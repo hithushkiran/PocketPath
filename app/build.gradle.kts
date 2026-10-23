@@ -41,6 +41,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.kotlinx.coroutines.core)
     implementation(libs.hilt.android)
     implementation(libs.androidx.compose.material.icons.core)
     ksp(libs.hilt.compiler)
