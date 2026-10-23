@@ -1,0 +1,26 @@
+<resources>
+    <string name="app_name">PocketPath</string>
+    <string name="home_heading">Your financial overview</string>
+    <string name="home_message">Your overview will bring together recorded income, spending and goals. Financial features will be connected in later blocks.</string>
+    <string name="activity_heading">Your activity in one place</string>
+    <string name="activity_message">Recorded income and spending will appear here once transaction storage is connected.</string>
+    <string name="plan_heading">Make room for what matters</string>
+    <string name="plan_message">Planning tools will help you organise spending and upcoming commitments in a later block.</string>
+    <string name="goals_heading">Give your savings a purpose</string>
+    <string name="goals_message">Goal setup and progress will be connected in a later block.</string>
+    <string name="transaction_heading">Record a transaction</string>
+    <string name="transaction_message">Income and expense entry will be connected in a later block. Use Back to return to your previous screen.</string>
+    <string name="accounts_heading">Your accounts</string>
+    <string name="accounts_message">Account setup and balances will be connected in a later block.</string>
+    <string name="settings_heading">Make PocketPath yours</string>
+    <string name="settings_message">App preferences will be available in a later block.</string>
+    <string name="nav_home">Home</string>
+    <string name="nav_activity">Activity</string>
+    <string name="nav_plan">Plan</string>
+    <string name="nav_goals">Goals</string>
+    <string name="nav_add">Add</string>
+    <string name="nav_accounts">Accounts</string>
+    <string name="nav_settings">Settings</string>
+    <string name="nav_back">Back</string>
+    <string name="nav_more">More</string>
+</resources>
