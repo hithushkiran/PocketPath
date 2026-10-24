@@ -1,6 +1,14 @@
 package com.pocketpath.data.firebase
 
 import com.google.firebase.Timestamp
+import com.pocketpath.data.local.LocalFinanceFile
+import com.pocketpath.data.local.SavedDrafts
+import com.pocketpath.data.local.StoredExpense
+import com.pocketpath.domain.money.EntryAmount
+import com.pocketpath.domain.repository.RecordExpenseCommand
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import java.nio.file.Files
 import com.pocketpath.data.sample.SampleFixtures
 import com.pocketpath.domain.calculation.BalanceUnits
 import com.pocketpath.domain.calculation.ReportPeriod
@@ -84,6 +92,67 @@ class FoundationCodecTest {
             assertThrows(IllegalArgumentException::class.java) {
                 FoundationCodec.event(expense.id, payload + (field to listOf("inconsistent-reference")))
             }
+        }
+    }
+
+    @Test fun pendingEventAllowsUnresolvedServerTimestamp() {
+        val expense = event("pending-expense", TransactionKind.EXPENSE, -85_000L)
+        val payload = stored(expense) + ("createdAt" to null)
+
+        val decoded = FoundationCodec.event(expense.id, payload, pending = true)
+
+        assertNull(decoded.createdAt)
+        assertEquals(expense.operationId, decoded.operationId)
+        assertEquals(expense.movements, decoded.movements)
+    }
+
+    @Test fun confirmedEventRequiresResolvedServerTimestamp() {
+        val expense = event("confirmed-expense", TransactionKind.EXPENSE, -85_000L)
+        val payload = stored(expense)
+
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.event(expense.id, payload + ("createdAt" to null))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.event(expense.id, payload - "createdAt")
+        }
+        assertEquals(audit.toDate().toInstant(), FoundationCodec.event(expense.id, payload).createdAt)
+    }
+
+    @Test fun persistedExpenseRoundTripPreservesScopeIdentityAndExactAmount() {
+        val command = RecordExpenseCommand(
+            operationId = "retained-operation",
+            accountId = SampleFixtures.cash.id,
+            amount = EntryAmount(Money.lkr(85_001L)),
+            categoryId = SampleFixtures.food.id,
+            commitmentClass = SampleFixtures.food.defaultCommitmentClass,
+            financialTime = SampleFixtures.time,
+            clientCreatedAt = SampleFixtures.instant,
+            note = "Retained draft",
+        )
+        val original = LocalFinanceFile(
+            userId = "sample-user-a",
+            draftRevision = 12L,
+            drafts = SavedDrafts(expenseCommand = StoredExpense.from(command)),
+        )
+        val json = Json { encodeDefaults = true }
+        val file = Files.createTempFile("pocketpath-expense-", ".json")
+        try {
+            Files.write(file, json.encodeToString(original).toByteArray(Charsets.UTF_8))
+            val restored = json.decodeFromString<LocalFinanceFile>(
+                String(Files.readAllBytes(file), Charsets.UTF_8),
+            )
+            val restoredCommand = requireNotNull(restored.drafts.expenseCommand).command()
+
+            assertEquals(original, restored)
+            assertEquals("sample-user-a", restored.userId)
+            assertNotEquals("sample-user-b", restored.userId)
+            assertEquals(command.operationId, restoredCommand.operationId)
+            assertEquals(85_001L, restoredCommand.amount.money.minor)
+            assertEquals(command.amount, restoredCommand.amount)
+            assertEquals(command.accountId, restoredCommand.accountId)
+        } finally {
+            Files.deleteIfExists(file)
         }
     }
 

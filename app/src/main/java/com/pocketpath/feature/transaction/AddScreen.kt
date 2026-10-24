@@ -9,6 +9,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
+import com.pocketpath.domain.repository.WriteState
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
@@ -22,7 +24,7 @@ fun AddScreen(
     onActivity: () -> Unit,
 ) {
     val form = state.expenseForm
-    val editable = state.ready && !form.busy && !form.locked && !form.saved
+    val editable = state.canEditDraft && !form.busy && !form.locked && !form.saved
 
     FinanceBody(state, onEvent) {
         Text("Record an expense", style = MaterialTheme.typography.headlineSmall)
@@ -31,6 +33,27 @@ fun AddScreen(
             Text("Create an LKR cash account before recording an expense.")
             Button(onClick = onAccounts, modifier = Modifier.fillMaxWidth()) {
                 Text("Set up an account")
+            }
+        }
+
+        state.rejectedExpenses.forEach { rejected ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                ) {
+                    FinanceMessage(rejected.message)
+                    TextButton(
+                        onClick = {
+                            onEvent(
+                                FinanceEvent.ReviewRejectedExpense(
+                                    rejected.operationId,
+                                ),
+                            )
+                        },
+                    ) {
+                        Text("Review this expense")
+                    }
+                }
             }
         }
 
@@ -121,8 +144,23 @@ fun AddScreen(
 
         form.error?.let { FinanceMessage(it) }
 
+        if (!form.busy && !form.locked && !form.saved) {
+            TextButton(
+                onClick = { onEvent(FinanceEvent.ClearExpenseDraft) },
+            ) {
+                Text("Clear draft")
+            }
+        }
+
         if (form.saved) {
-            FinanceMessage("Expense saved.", error = false)
+            FinanceMessage(
+                text = if (form.writeState == WriteState.CLOUD_CONFIRMED) {
+                    "Expense synchronized."
+                } else {
+                    "Expense saved on this device. Awaiting synchronization."
+                },
+                error = false,
+            )
 
             Button(onClick = onActivity, modifier = Modifier.fillMaxWidth()) {
                 Text("View Activity")
@@ -141,7 +179,7 @@ fun AddScreen(
 
             Button(
                 onClick = { onEvent(FinanceEvent.SaveExpense) },
-                enabled = state.ready &&
+                enabled = state.canRecordExpense &&
                     !form.busy &&
                     state.selectableAccounts.isNotEmpty() &&
                     state.selectableCategories.isNotEmpty(),

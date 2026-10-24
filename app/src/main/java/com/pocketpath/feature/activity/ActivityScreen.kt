@@ -72,6 +72,14 @@ fun ActivityScreen(
                 ) {
                     Text(title, style = MaterialTheme.typography.titleMedium)
 
+                    if (event.id in state.pendingExpenseIds) {
+                        Text("Awaiting synchronization")
+                    }
+
+                    if (state.cached) {
+                        Text("Cached activity")
+                    }
+
                     movement?.amount?.let { amount ->
                         Text(
                             "${amount.asset.code} ${amount.major().toPlainString()}",

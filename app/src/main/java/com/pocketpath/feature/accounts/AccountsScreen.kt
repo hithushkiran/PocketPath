@@ -16,7 +16,7 @@ fun AccountsScreen(
     onEvent: (FinanceEvent) -> Unit,
 ) {
     val form = state.accountForm
-    val editable = state.ready && !form.busy && !form.locked && !form.saved
+    val editable = state.canEditDraft && !form.busy && !form.locked && !form.saved
 
     FinanceBody(state, onEvent) {
         Text("New cash account", style = MaterialTheme.typography.headlineSmall)
@@ -52,6 +52,10 @@ fun AccountsScreen(
             modifier = Modifier.fillMaxWidth(),
         )
 
+        if (state.cached) {
+            Text("You can prepare this draft offline. Connect to create the account.")
+        }
+
         form.error?.let { FinanceMessage(it) }
 
         if (form.saved) {
@@ -70,7 +74,7 @@ fun AccountsScreen(
 
             Button(
                 onClick = { onEvent(FinanceEvent.CreateAccount) },
-                enabled = state.ready && !form.busy,
+                enabled = state.ready && !state.cached && !form.busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(

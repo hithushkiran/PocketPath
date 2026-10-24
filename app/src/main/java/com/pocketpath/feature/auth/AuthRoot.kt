@@ -7,6 +7,11 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -59,18 +64,62 @@ fun AuthRoot(
             }
 
             key(current.user.uid) {
+                var confirmSignOut by remember { mutableStateOf(false) }
+
                 PocketPathApp(
                     email = current.user.email,
                     authBusy = action.busy,
                     authError = action.messageRes
                         ?.takeIf { action.isError }
-                        ?.let { stringResource(it) },
-                    onSignOut = viewModel::signOut,
+                        ?.let { stringResource(it) }
+                        ?: visibleFinance.localError,
+                    onSignOut = {
+                        if (visibleFinance.hasUnresolvedLocalWork) {
+                            confirmSignOut = true
+                        } else {
+                            financeViewModel.flushAndSignOut(
+                                current.user.uid,
+                                viewModel::signOut,
+                            )
+                        }
+                    },
                     financeState = visibleFinance,
                     onFinanceEvent = {
                         financeViewModel.onEvent(current.user.uid, it)
                     },
                 )
+
+                if (confirmSignOut) {
+                    AlertDialog(
+                        onDismissRequest = { confirmSignOut = false },
+                        title = { Text("Sign out with local work?") },
+                        text = {
+                            Text(
+                                "Drafts and unresolved saves will remain on this device " +
+                                    "for this account. You may need to sign back in to " +
+                                    "finish synchronization.",
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    confirmSignOut = false
+                                    financeViewModel.flushAndSignOut(
+                                        current.user.uid,
+                                        viewModel::signOut,
+                                    )
+                                },
+                            ) {
+                                Text("Sign out")
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { confirmSignOut = false }) {
+                                Text("Stay signed in")
+                            }
+                        },
+                    )
+                }
             }
         }
     }

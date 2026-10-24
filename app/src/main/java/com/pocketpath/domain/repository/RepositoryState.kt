@@ -10,6 +10,7 @@ data class ObservationMetadata(
     val completeness: HistoryCompleteness = HistoryCompleteness.NOT_APPLICABLE,
     val writeState: WriteState? = null,
     val observedAt: Instant? = null,
+    val pendingOperationIds: Set<String> = emptySet(),
 )
 enum class FailureCode { VALIDATION, CONFLICT, NOT_FOUND, UNAUTHENTICATED, PERMISSION_DENIED, NETWORK, REJECTED, INCOMPLETE_HISTORY }
 data class RepositoryFailure(val code: FailureCode, val message: String, val operationId: String? = null)

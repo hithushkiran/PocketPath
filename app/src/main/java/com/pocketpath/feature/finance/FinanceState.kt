@@ -6,6 +6,7 @@ import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
 import com.pocketpath.domain.money.FiatCurrency
+import com.pocketpath.domain.repository.WriteState
 import com.pocketpath.domain.repository.ActivityCursor
 
 data class CashAccountForm(
@@ -29,6 +30,12 @@ data class ExpenseForm(
     val locked: Boolean = false,
     val saved: Boolean = false,
     val error: String? = null,
+    val writeState: WriteState? = null,
+)
+
+data class RejectedExpense(
+    val operationId: String,
+    val message: String,
 )
 
 data class FinanceUiState(
@@ -45,7 +52,49 @@ data class FinanceUiState(
     val activityLoading: Boolean = false,
     val activityError: String? = null,
     val nextActivityCursor: ActivityCursor? = null,
+    val draftsLoaded: Boolean = false,
+    val draftSaving: Boolean = false,
+    val localError: String? = null,
+    val referencesReady: Boolean = false,
+    val cached: Boolean = false,
+    val lastConfirmedAt: String? = null,
+    val sdkPendingIds: Set<String> = emptySet(),
+    val receiptPendingIds: Set<String> = emptySet(),
+    val uncertainSaveIds: Set<String> = emptySet(),
+    val rejectedExpenses: List<RejectedExpense> = emptyList(),
 ) {
+    val pendingExpenseIds: Set<String>
+        get() = sdkPendingIds + receiptPendingIds
+
+    val canEditDraft: Boolean
+        get() = userId != null && draftsLoaded
+
+    val canRecordExpense: Boolean
+        get() = canEditDraft &&
+            referencesReady &&
+            localError == null &&
+            selectableAccounts.isNotEmpty() &&
+            selectableCategories.isNotEmpty()
+
+    val hasUnresolvedLocalWork: Boolean
+        get() = pendingExpenseIds.isNotEmpty() ||
+            uncertainSaveIds.isNotEmpty() ||
+            rejectedExpenses.isNotEmpty() ||
+            (
+                !accountForm.saved &&
+                    (
+                        accountForm.name.isNotBlank() ||
+                            accountForm.opening !in setOf("", "0", "0.00")
+                    )
+            ) ||
+            (
+                !expenseForm.saved &&
+                    (
+                        expenseForm.amount.isNotBlank() ||
+                            expenseForm.note.isNotBlank()
+                    )
+            )
+
     val ready: Boolean
         get() = userId != null && !loading && error == null
 
@@ -59,6 +108,8 @@ data class FinanceUiState(
 }
 
 sealed interface FinanceEvent {
+    data object ClearExpenseDraft : FinanceEvent
+    data class ReviewRejectedExpense(val operationId: String) : FinanceEvent
     data object RetryConnection : FinanceEvent
 
     data class AccountNameChanged(val value: String) : FinanceEvent

@@ -15,6 +15,11 @@ import com.pocketpath.domain.calculation.accountBalance
 import com.pocketpath.domain.model.*
 import com.pocketpath.domain.money.*
 import com.pocketpath.domain.repository.*
+import com.pocketpath.data.local.FinanceLocalStore
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -38,7 +43,12 @@ class FirebaseFoundationRepository internal constructor(
     private val owned: UserFirestoreScope,
     private val auth: FirebaseAuth,
     private val firestore: FirebaseFirestore,
+    private val local: com.pocketpath.data.local.FinanceLocalStore,
+    private val offlineWriter: OfflineExpenseWriter,
 ) : AccountRepository, LedgerRepository {
+
+    @Volatile
+    private var preferCachedActivity = true
 
     override val userId: String = owned.userId
 
@@ -165,6 +175,7 @@ class FirebaseFoundationRepository internal constructor(
         observeQuery(
             query = { categories.limit(5001) },
             completeHistory = false,
+            coverageKey = "categories-v1",
         ) { snapshot ->
             checkLimit(snapshot)
             snapshot.documents.map {
@@ -176,6 +187,7 @@ class FirebaseFoundationRepository internal constructor(
         observeQuery(
             query = { accounts.limit(5001) },
             completeHistory = false,
+            coverageKey = "accounts-v1",
         ) { snapshot ->
             checkLimit(snapshot)
             snapshot.documents.map {
@@ -303,6 +315,7 @@ class FirebaseFoundationRepository internal constructor(
         observeQuery(
             query = { effectiveQuery() },
             completeHistory = true,
+            coverageKey = "ledger-posted-v1",
         ) { snapshot ->
             decodeLedger(snapshot)
         }
@@ -394,9 +407,16 @@ class FirebaseFoundationRepository internal constructor(
     ): Observation<ActivityPage> = read {
         query.accountId?.let(FoundationCodec::checkId)
 
-        val snapshot = effectiveQuery().get(Source.SERVER).await()
+        val source = if (preferCachedActivity) Source.CACHE else Source.DEFAULT
+        val snapshot = effectiveQuery().get(source).await()
         requireSession()
-        requireCompleteSnapshot(snapshot)
+        checkLimit(snapshot)
+
+        val pageMetadata = snapshotMetadata(
+            snapshot,
+            coverageKey = "ledger-posted-v1",
+            requireHistory = false,
+        )
 
         val events = decodeLedger(snapshot).events
             .filter { query.accountId == null || query.accountId in it.accountIds }
@@ -447,7 +467,7 @@ class FirebaseFoundationRepository internal constructor(
 
         Observation.Data(
             value = ActivityPage(page, next),
-            metadata = serverMetadata().copy(
+            metadata = pageMetadata.copy(
                 completeness = HistoryCompleteness.INCOMPLETE,
             ),
         )
@@ -455,100 +475,88 @@ class FirebaseFoundationRepository internal constructor(
 
     override suspend fun recordExpense(
         command: RecordExpenseCommand,
-    ): CommandResult<FinancialTransaction> = command(command.operationId) {
-        FoundationCodec.checkId(command.operationId)
-        FoundationCodec.checkId(command.accountId)
-        FoundationCodec.checkId(command.categoryId)
+    ): CommandResult<FinancialTransaction> {
+        requireSession()
+        val result = offlineWriter.submit(owned, command)
+        requireSession()
+        return result
+    }
 
-        require(command.amount.money.currency == FiatCurrency.LKR)
-        require(command.historicalRate == null && command.rateSnapshotId == null)
-        require(command.occurrenceId == null) {
-            "Commitment payments require the schedule implementation"
+    suspend fun cachedProfile(): UserProfile? {
+        requireSession()
+
+        return try {
+            val snapshot = owned.profile.get(Source.CACHE).await()
+            requireSession()
+
+            if (snapshot.exists()) {
+                FoundationCodec.profile(userId, requireNotNull(snapshot.data))
+            } else {
+                null
+            }
+        } catch (error: FirebaseFirestoreException) {
+            if (error.code == FirebaseFirestoreException.Code.UNAVAILABLE) {
+                null
+            } else {
+                throw error
+            }
+        }
+    }
+
+    suspend fun reconcileExpenseReceipts() {
+        requireSession()
+        offlineWriter.reconcile(userId)
+    }
+
+    private suspend fun snapshotMetadata(
+        snapshot: QuerySnapshot,
+        coverageKey: String,
+        requireHistory: Boolean,
+    ): ObservationMetadata {
+        requireSession()
+        checkLimit(snapshot)
+
+        val ids = snapshot.documents.map { it.id }.toSet()
+        val pendingIds = snapshot.documents.filter {
+            it.metadata.hasPendingWrites()
+        }.map { it.id }.toSet()
+
+        if (!snapshot.metadata.isFromCache && !snapshot.metadata.hasPendingWrites()) {
+            local.saveCoverage(userId, coverageKey, ids)
         }
 
-        val event = FinancialTransaction(
-            operationId = command.operationId,
-            kind = TransactionKind.EXPENSE,
-            status = TransactionStatus.POSTED,
-            financialTime = FoundationCodec.storedTime(command.financialTime),
-            clientCreatedAt = FoundationCodec.storedInstant(command.clientCreatedAt),
-            movements = listOf(
-                AccountMovement(
-                    command.accountId,
-                    NativeAmount.Fiat(-command.amount.money),
-                ),
-            ),
-            components = listOf(
-                ReportComponent(
-                    nature = ComponentNature.SPENDING,
-                    lkrAmount = KnownLkrAmount.Known(command.amount.money),
-                    categoryId = command.categoryId,
-                    commitmentClass = command.commitmentClass,
-                ),
-            ),
-            note = command.note,
-            merchantLabel = command.merchantLabel,
-        )
+        val coverage = local.read(userId).coverage[coverageKey]
+        val knownCoverage = !snapshot.metadata.isFromCache ||
+            (coverage != null && ids.containsAll(coverage.ids))
 
-        val eventData = FoundationCodec.eventData(event)
-        val eventReference = transactions.document(event.id)
-        val accountReference = accounts.document(command.accountId)
-        val categoryReference = categories.document(command.categoryId)
+        if (requireHistory && !knownCoverage) {
+            throw incomplete()
+        }
 
-        val result = firestore.runTransaction { transaction ->
-            requireSession()
-            val existing = transaction.get(eventReference)
-
-            if (existing.exists()) {
-                if (!FoundationCodec.sameEvent(
-                        requireNotNull(existing.data),
-                        eventData,
-                    )
-                ) {
-                    throw conflict()
-                }
-
-                Applied(
-                    FoundationCodec.event(
-                        existing.id,
-                        requireNotNull(existing.data),
-                    ),
-                    replayed = true,
-                )
+        return ObservationMetadata(
+            origin = if (snapshot.metadata.isFromCache) {
+                DataOrigin.CACHE
             } else {
-                val accountSnapshot = transaction.get(accountReference)
-                val categorySnapshot = transaction.get(categoryReference)
-
-                if (!accountSnapshot.exists() || !categorySnapshot.exists()) {
-                    throw FoundationProblem(
-                        FailureCode.NOT_FOUND,
-                        "Select an existing account and category.",
-                    )
-                }
-
-                val account = FoundationCodec.account(
-                    accountSnapshot.id,
-                    requireNotNull(accountSnapshot.data),
-                )
-
-                require(account.asset == FiatCurrency.LKR)
-                require(account.metadata.archivedAt == null) {
-                    "An archived account cannot receive a new expense"
-                }
-                require(categorySnapshot.get("archivedAt") == null) {
-                    "An archived category cannot receive a new expense"
-                }
-
-                // Recorded expenses may make the balance negative.
-                transaction.set(eventReference, eventData)
-                Applied(event)
-            }
-        }.await()
-
-        CommandResult.Accepted(
-            value = result.value,
-            writeState = WriteState.CLOUD_CONFIRMED,
-            replayed = result.replayed,
+                DataOrigin.SERVER
+            },
+            completeness = if (knownCoverage) {
+                HistoryCompleteness.COMPLETE
+            } else {
+                HistoryCompleteness.INCOMPLETE
+            },
+            writeState = if (pendingIds.isNotEmpty()) {
+                WriteState.PENDING
+            } else if (snapshot.metadata.isFromCache) {
+                WriteState.LOCAL_SAVED
+            } else {
+                WriteState.CLOUD_CONFIRMED
+            },
+            observedAt = if (snapshot.metadata.isFromCache) {
+                coverage?.observedAt?.let(Instant::parse)
+            } else {
+                Instant.now()
+            },
+            pendingOperationIds = pendingIds,
         )
     }
 
@@ -557,7 +565,11 @@ class FirebaseFoundationRepository internal constructor(
 
         return CompleteLedger(
             snapshot.documents.map {
-                FoundationCodec.event(it.id, requireNotNull(it.data))
+                FoundationCodec.event(
+                    it.id,
+                    requireNotNull(it.data),
+                    pending = it.metadata.hasPendingWrites(),
+                )
             },
         )
     }
@@ -581,76 +593,84 @@ class FirebaseFoundationRepository internal constructor(
     private fun <T> observeQuery(
         query: () -> Query,
         completeHistory: Boolean,
+        coverageKey: String,
         decode: (QuerySnapshot) -> T,
-    ): Flow<Observation<T>> = callbackFlow {
-        trySend(Observation.Loading)
+    ): Flow<Observation<T>> = flow {
+        emit(Observation.Loading)
+        var lastAvailable: Observation.Data<T>? = null
 
-        var lastConfirmed: Observation.Data<T>? = null
+        try {
+            val snapshots = callbackFlow<
+                Pair<QuerySnapshot?, FirebaseFirestoreException?>
+            > {
+                val sessionEnded: () -> Unit = {
+                    channel.close(
+                        FoundationProblem(
+                            FailureCode.UNAUTHENTICATED,
+                            "Your session has ended. Sign in again.",
+                        ),
+                    )
+                    Unit
+                }
 
-        val sessionEnded: () -> Unit = {
-            lastConfirmed = null
-            trySend(
-                Observation.Failed<T>(
-                    RepositoryFailure(
-                        FailureCode.UNAUTHENTICATED,
-                        "Your session has ended. Sign in again.",
-                    ),
-                ),
-            )
-            channel.close()
-            Unit
-        }
+                closeActions.add(sessionEnded)
 
-        closeActions.add(sessionEnded)
+                val registration = try {
+                    requireSession()
+                    query().addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
+                        trySend(snapshot to error)
+                    }
+                } catch (error: Exception) {
+                    channel.close(error)
+                    null
+                }
 
-        val registration = try {
-            requireSession()
+                awaitClose {
+                    registration?.remove()
+                    closeActions.remove(sessionEnded)
+                }
+            }
 
-            query().addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
-                if (!isCurrentSession()) {
-                    sessionEnded()
-                } else if (error != null) {
-                    trySend(Observation.Failed(error.failure(), lastConfirmed))
-                    channel.close()
-                } else if (snapshot != null) {
+            snapshots.collect { (snapshot, error) ->
+                requireSession()
+                if (error != null) throw error
+
+                if (snapshot != null) {
+                    if (coverageKey == "ledger-posted-v1") {
+                        preferCachedActivity = snapshot.metadata.isFromCache
+                    }
+
                     try {
-                        requireCompleteSnapshot(snapshot)
-
-                        val data = Observation.Data(
-                            value = decode(snapshot),
-                            metadata = serverMetadata(completeHistory),
+                        val metadata = snapshotMetadata(
+                            snapshot,
+                            coverageKey,
+                            requireHistory = completeHistory,
                         )
-
-                        // Recheck after decoding before exposing user data.
+                        val value = decode(snapshot)
                         requireSession()
-                        lastConfirmed = data
-                        trySend(data)
-                    } catch (exception: Exception) {
-                        if (!isCurrentSession()) {
-                            sessionEnded()
-                        } else {
-                            trySend(
-                                Observation.Failed(
-                                    exception.failure(),
-                                    lastConfirmed,
-                                ),
-                            )
-                        }
+
+                        val data = Observation.Data(value, metadata)
+                        lastAvailable = data
+                        emit(data)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        requireSession()
+                        emit(Observation.Failed(error.failure(), lastAvailable))
                     }
                 }
             }
-        } catch (exception: Exception) {
-            trySend(Observation.Failed<T>(exception.failure()))
-            channel.close()
-            null
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            emit(
+                Observation.Failed(
+                    error.failure(),
+                    lastAvailable.takeIf { isCurrentSession() },
+                ),
+            )
         }
-
-        awaitClose {
-            registration?.remove()
-            closeActions.remove(sessionEnded)
-            lastConfirmed = null
-        }
-    }
+    }.flowOn(Dispatchers.IO)
 
     private fun serverMetadata(history: Boolean = false) = ObservationMetadata(
         origin = DataOrigin.SERVER,

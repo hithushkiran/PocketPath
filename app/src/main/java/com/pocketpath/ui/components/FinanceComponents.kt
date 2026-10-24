@@ -67,6 +67,43 @@ fun FinanceStatus(
             Text("Retry connection")
         }
     }
+
+    when {
+        state.pendingExpenseIds.isNotEmpty() -> {
+            Text("${state.pendingExpenseIds.size} expense(s) awaiting synchronization.")
+        }
+
+        state.uncertainSaveIds.isNotEmpty() -> {
+            Text("A save needs confirmation. Reconnect to check its result.")
+        }
+
+        state.cached -> {
+            Text("Using cached data. Other-device changes may be missing.")
+            state.lastConfirmedAt?.let {
+                Text("Last complete refresh: $it")
+            }
+        }
+
+        state.ready -> {
+            Text("Financial data refreshed from the server.")
+        }
+    }
+
+    if (state.draftsLoaded) {
+        Text(
+            if (state.draftSaving) {
+                "Saving draft on this device…"
+            } else {
+                "Draft retained on this device."
+            },
+        )
+    }
+
+    state.localError?.let { FinanceMessage(it) }
+
+    if (state.rejectedExpenses.isNotEmpty()) {
+        FinanceMessage("Some expenses could not synchronize. Open Add to review them.")
+    }
 }
 
 @Composable

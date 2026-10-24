@@ -266,7 +266,11 @@ internal object FoundationCodec {
         }
     }
 
-    fun event(id: String, data: FirestoreFields): FinancialTransaction {
+    fun event(
+        id: String,
+        data: FirestoreFields,
+        pending: Boolean = false,
+    ): FinancialTransaction {
         checkId(id)
         data.checkKeys(eventRequired, setOf("note", "merchantLabel"))
         require(data.text("operationId") == id)
@@ -326,7 +330,11 @@ internal object FoundationCodec {
             components = components,
             note = data.optionalText("note"),
             merchantLabel = data.optionalText("merchantLabel"),
-            createdAt = data.instant("createdAt"),
+            createdAt = if (pending && data["createdAt"] == null) {
+                null
+            } else {
+                data.instant("createdAt")
+            },
         )
 
         require(result.movements.size == 1)

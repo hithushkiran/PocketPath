@@ -15,6 +15,8 @@ class FirebaseFoundationFactory @Inject constructor(
     private val auth: FirebaseAuth,
     private val firestore: FirebaseFirestore,
     private val paths: UserFirestorePaths,
+    private val local: com.pocketpath.data.local.FinanceLocalStore,
+    private val offlineWriter: OfflineExpenseWriter,
 ) {
     private val lock = Any()
     private var repository: FirebaseFoundationRepository? = null
@@ -43,6 +45,8 @@ class FirebaseFoundationFactory @Inject constructor(
                 owned = scope,
                 auth = auth,
                 firestore = firestore,
+                local = local,
+                offlineWriter = offlineWriter,
             ).also {
                 repository = it
             }
