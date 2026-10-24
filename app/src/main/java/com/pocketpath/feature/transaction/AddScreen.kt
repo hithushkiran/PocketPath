@@ -1,11 +1,160 @@
 package com.pocketpath.feature.transaction
 
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.res.stringResource
-import com.pocketpath.R
-import com.pocketpath.ui.components.FeaturePlaceholder
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.KeyboardType
+import com.pocketpath.domain.model.CommitmentClass
+import com.pocketpath.feature.finance.FinanceEvent
+import com.pocketpath.feature.finance.FinanceUiState
+import com.pocketpath.ui.components.*
 
 @Composable
-fun AddScreen() {
-    FeaturePlaceholder(stringResource(R.string.transaction_heading), stringResource(R.string.transaction_message))
+fun AddScreen(
+    state: FinanceUiState,
+    onEvent: (FinanceEvent) -> Unit,
+    onAccounts: () -> Unit,
+    onActivity: () -> Unit,
+) {
+    val form = state.expenseForm
+    val editable = state.ready && !form.busy && !form.locked && !form.saved
+
+    FinanceBody(state, onEvent) {
+        Text("Record an expense", style = MaterialTheme.typography.headlineSmall)
+
+        if (state.ready && state.selectableAccounts.isEmpty()) {
+            Text("Create an LKR cash account before recording an expense.")
+            Button(onClick = onAccounts, modifier = Modifier.fillMaxWidth()) {
+                Text("Set up an account")
+            }
+        }
+
+        FinanceChoice(
+            label = "Account",
+            selectedId = form.accountId,
+            options = state.selectableAccounts.map { it.id to it.name },
+            enabled = editable,
+            onSelected = { onEvent(FinanceEvent.ExpenseAccountChanged(it)) },
+        )
+
+        FinanceChoice(
+            label = "Category",
+            selectedId = form.categoryId,
+            options = state.selectableCategories.map { it.id to it.name },
+            enabled = editable,
+            onSelected = { onEvent(FinanceEvent.ExpenseCategoryChanged(it)) },
+        )
+
+        if (state.ready && state.selectableCategories.isEmpty()) {
+            Text("No active categories are available.")
+        }
+
+        OutlinedTextField(
+            value = form.amount,
+            onValueChange = { onEvent(FinanceEvent.ExpenseAmountChanged(it)) },
+            label = { Text("Amount (LKR)") },
+            supportingText = { Text("Use at most two decimal places, without commas.") },
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            singleLine = true,
+            enabled = editable,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        OutlinedTextField(
+            value = form.date,
+            onValueChange = { onEvent(FinanceEvent.ExpenseDateChanged(it)) },
+            label = { Text("Expense date") },
+            supportingText = { Text("yyyy-MM-dd") },
+            singleLine = true,
+            enabled = editable,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Text("Spending type", style = MaterialTheme.typography.titleMedium)
+
+        Column(modifier = Modifier.selectableGroup()) {
+            CommitmentClass.entries.forEach { classification ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = form.classification == classification,
+                            enabled = editable,
+                            role = Role.RadioButton,
+                            onClick = {
+                                onEvent(FinanceEvent.ExpenseClassChanged(classification))
+                            },
+                        ),
+                ) {
+                    RadioButton(
+                        selected = form.classification == classification,
+                        onClick = null,
+                        enabled = editable,
+                    )
+                    Text(
+                        text = when (classification) {
+                            CommitmentClass.COMMITTED -> "Committed"
+                            CommitmentClass.DISCRETIONARY -> "Discretionary"
+                            CommitmentClass.UNPLANNED_ESSENTIAL -> "Unplanned essential"
+                        },
+                        modifier = Modifier.align(
+                            androidx.compose.ui.Alignment.CenterVertically,
+                        ),
+                    )
+                }
+            }
+        }
+
+        OutlinedTextField(
+            value = form.note,
+            onValueChange = { onEvent(FinanceEvent.ExpenseNoteChanged(it)) },
+            label = { Text("Note (optional)") },
+            supportingText = { Text("${form.note.length}/1000 characters") },
+            enabled = editable,
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        form.error?.let { FinanceMessage(it) }
+
+        if (form.saved) {
+            FinanceMessage("Expense saved.", error = false)
+
+            Button(onClick = onActivity, modifier = Modifier.fillMaxWidth()) {
+                Text("View Activity")
+            }
+
+            OutlinedButton(
+                onClick = { onEvent(FinanceEvent.NewExpense) },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Record another expense")
+            }
+        } else {
+            if (form.locked && !form.busy) {
+                Text("Save is not confirmed. Retry without changing the entry.")
+            }
+
+            Button(
+                onClick = { onEvent(FinanceEvent.SaveExpense) },
+                enabled = state.ready &&
+                    !form.busy &&
+                    state.selectableAccounts.isNotEmpty() &&
+                    state.selectableCategories.isNotEmpty(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    when {
+                        form.busy -> "Saving…"
+                        form.locked -> "Retry save"
+                        else -> "Save expense"
+                    },
+                )
+            }
+        }
+    }
 }

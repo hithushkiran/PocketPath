@@ -1,5 +1,7 @@
 package com.pocketpath.feature.auth
 
+import com.pocketpath.feature.finance.FinanceUiState
+import com.pocketpath.feature.finance.FinanceViewModel
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,7 +19,10 @@ import com.pocketpath.domain.repository.AuthSession
 import com.pocketpath.navigation.PocketPathApp
 
 @Composable
-fun AuthRoot(viewModel: AuthViewModel) {
+fun AuthRoot(
+    viewModel: AuthViewModel,
+    financeViewModel: FinanceViewModel,
+) {
     val session by viewModel.session.collectAsStateWithLifecycle()
     val action by viewModel.actionState.collectAsStateWithLifecycle()
 
@@ -44,7 +49,15 @@ fun AuthRoot(viewModel: AuthViewModel) {
         }
 
         is AuthSession.SignedIn -> {
-            // Dispose this navigation tree on logout or UID changes.
+            val financeState by financeViewModel.state.collectAsStateWithLifecycle()
+
+            // Never render a previous user's state while session observers catch up.
+            val visibleFinance = if (financeState.userId == current.user.uid) {
+                financeState
+            } else {
+                FinanceUiState(userId = current.user.uid)
+            }
+
             key(current.user.uid) {
                 PocketPathApp(
                     email = current.user.email,
@@ -53,6 +66,10 @@ fun AuthRoot(viewModel: AuthViewModel) {
                         ?.takeIf { action.isError }
                         ?.let { stringResource(it) },
                     onSignOut = viewModel::signOut,
+                    financeState = visibleFinance,
+                    onFinanceEvent = {
+                        financeViewModel.onEvent(current.user.uid, it)
+                    },
                 )
             }
         }

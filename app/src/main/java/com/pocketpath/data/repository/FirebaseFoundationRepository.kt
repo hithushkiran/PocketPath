@@ -103,6 +103,75 @@ class FirebaseFoundationRepository internal constructor(
         )
     }
 
+    /**
+     * Creates missing initial categories without overwriting existing choices.
+     * Category editing/archival remains with the Spending feature.
+     */
+    suspend fun ensureBasicCategories(): CommandResult<Unit> = command(null) {
+        val defaults = listOf(
+            Category(
+                id = "food",
+                name = "Food",
+                defaultCommitmentClass = CommitmentClass.DISCRETIONARY,
+                sortOrder = 0,
+            ),
+            Category(
+                id = "transport",
+                name = "Transport",
+                defaultCommitmentClass = CommitmentClass.DISCRETIONARY,
+                sortOrder = 1,
+            ),
+            Category(
+                id = "other",
+                name = "Other",
+                defaultCommitmentClass = CommitmentClass.DISCRETIONARY,
+                sortOrder = 2,
+            ),
+        )
+
+        val references = defaults.map { categories.document(it.id) }
+
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+
+            // Read every document before writing any document.
+            val existing = references.map { transaction.get(it) }
+
+            existing.forEachIndexed { index, snapshot ->
+                if (snapshot.exists()) {
+                    FoundationCodec.category(
+                        snapshot.id,
+                        requireNotNull(snapshot.data),
+                    )
+                } else {
+                    transaction.set(
+                        references[index],
+                        FoundationCodec.categoryData(defaults[index]),
+                    )
+                }
+            }
+
+            existing.all { it.exists() }
+        }.await()
+
+        CommandResult.Accepted(
+            value = Unit,
+            writeState = WriteState.CLOUD_CONFIRMED,
+            replayed = replayed,
+        )
+    }
+
+    fun observeCategories(): Flow<Observation<List<Category>>> =
+        observeQuery(
+            query = { categories.limit(5001) },
+            completeHistory = false,
+        ) { snapshot ->
+            checkLimit(snapshot)
+            snapshot.documents.map {
+                FoundationCodec.category(it.id, requireNotNull(it.data))
+            }.sortedWith(compareBy(Category::sortOrder, Category::id))
+        }
+
     override fun observeAccounts(): Flow<Observation<List<Account>>> =
         observeQuery(
             query = { accounts.limit(5001) },

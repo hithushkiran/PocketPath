@@ -37,6 +37,51 @@ internal object FoundationCodec {
         "schemaVersion", "createdAt", "updatedAt",
     )
 
+    fun categoryData(category: Category): Map<String, Any> {
+        checkId(category.id)
+        require(category.metadata == RecordMetadata())
+
+        return buildMap {
+            put("name", category.name)
+            put("defaultCommitmentClass", category.defaultCommitmentClass.name)
+            put("sortOrder", category.sortOrder.toLong())
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+            put("revision", 0L)
+            category.iconKey?.let { put("iconKey", it) }
+        }
+    }
+
+    fun category(id: String, data: FirestoreFields): Category {
+        checkId(id)
+        data.checkKeys(
+            setOf(
+                "name", "defaultCommitmentClass", "sortOrder",
+                "createdAt", "updatedAt", "revision",
+            ),
+            setOf("iconKey", "archivedAt"),
+        )
+
+        val sortOrder = data.integer("sortOrder")
+        require(sortOrder in Int.MIN_VALUE.toLong()..Int.MAX_VALUE.toLong())
+
+        return Category(
+            id = id,
+            name = data.text("name"),
+            defaultCommitmentClass = CommitmentClass.valueOf(
+                data.text("defaultCommitmentClass"),
+            ),
+            iconKey = data.optionalText("iconKey"),
+            sortOrder = sortOrder.toInt(),
+            metadata = RecordMetadata(
+                createdAt = data.instant("createdAt"),
+                updatedAt = data.instant("updatedAt"),
+                revision = data.integer("revision"),
+                archivedAt = data.optionalInstant("archivedAt"),
+            ),
+        )
+    }
+
     fun checkId(id: String) {
         require(id.isNotBlank() && '/' !in id && id != "." && id != "..") {
             "Invalid document identity"

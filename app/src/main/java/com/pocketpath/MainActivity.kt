@@ -1,5 +1,6 @@
 package com.pocketpath
 
+import com.pocketpath.feature.finance.FinanceViewModel
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -18,10 +19,14 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
 
         val authViewModel = ViewModelProvider(this)[AuthViewModel::class.java]
+        val financeViewModel = ViewModelProvider(this)[FinanceViewModel::class.java]
 
         setContent {
             PocketPathTheme {
-                AuthRoot(viewModel = authViewModel)
+                AuthRoot(
+                    viewModel = authViewModel,
+                    financeViewModel = financeViewModel,
+                )
             }
         }
     }

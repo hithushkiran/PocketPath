@@ -1,5 +1,7 @@
 package com.pocketpath.navigation
 
+import com.pocketpath.feature.finance.FinanceEvent
+import com.pocketpath.feature.finance.FinanceUiState
 import androidx.annotation.StringRes
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -75,6 +77,8 @@ fun PocketPathApp(
     authBusy: Boolean = false,
     authError: String? = null,
     onSignOut: () -> Unit = {},
+    financeState: FinanceUiState = FinanceUiState(),
+    onFinanceEvent: (FinanceEvent) -> Unit = {},
 ) {
     val navController = rememberNavController()
     val entry by navController.currentBackStackEntryAsState()
@@ -164,12 +168,50 @@ fun PocketPathApp(
             startDestination = Home,
             modifier = Modifier.padding(padding).consumeWindowInsets(padding),
         ) {
-            composable<Home> { HomeScreen() }
-            composable<Activity> { ActivityScreen() }
+            composable<Home> {
+                HomeScreen(
+                    state = financeState,
+                    onEvent = onFinanceEvent,
+                    onAccounts = {
+                        navController.navigate(Accounts) { launchSingleTop = true }
+                    },
+                    onAddExpense = {
+                        navController.navigate(Add) { launchSingleTop = true }
+                    },
+                )
+            }
+            composable<Activity> {
+                ActivityScreen(
+                    state = financeState,
+                    onEvent = onFinanceEvent,
+                )
+            }
             composable<Plan> { PlanScreen() }
             composable<Goals> { GoalsScreen() }
-            composable<Add> { AddScreen() }
-            composable<Accounts> { AccountsScreen() }
+            composable<Add> {
+                AddScreen(
+                    state = financeState,
+                    onEvent = onFinanceEvent,
+                    onAccounts = {
+                        navController.navigate(Accounts) { launchSingleTop = true }
+                    },
+                    onActivity = {
+                        navController.navigate(Activity) {
+                            popUpTo(navController.graph.findStartDestination().id) {
+                                saveState = true
+                            }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
+                )
+            }
+            composable<Accounts> {
+                AccountsScreen(
+                    state = financeState,
+                    onEvent = onFinanceEvent,
+                )
+            }
             composable<Settings> {
                 SettingsScreen(
                     email = email,

@@ -101,6 +101,33 @@ service cloud.firestore {
         && data.revision == 0;
     }
 
+    function validCategory(data) {
+      return fields(
+          data,
+          [
+            'name', 'defaultCommitmentClass', 'sortOrder',
+            'createdAt', 'updatedAt', 'revision'
+          ],
+          ['iconKey']
+        )
+        && data.name is string
+        && data.name.size() > 0
+        && data.defaultCommitmentClass in [
+          'COMMITTED', 'DISCRETIONARY', 'UNPLANNED_ESSENTIAL'
+        ]
+        && data.sortOrder is int
+        && data.sortOrder >= -2147483648
+        && data.sortOrder <= 2147483647
+        && (
+          !('iconKey' in data)
+          || data.iconKey is string
+        )
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.revision is int
+        && data.revision == 0;
+    }
+
     function validMovement(movement) {
       return fields(
           movement,
@@ -237,6 +264,14 @@ service cloud.firestore {
         && validDefaultProfile(request.resource.data);
 
       allow update, delete: if false;
+
+      match /categories/{categoryId} {
+        allow create: if isOwner(uid)
+          && validId(categoryId)
+          && validCategory(request.resource.data);
+
+        allow update, delete: if false;
+      }
 
       match /accounts/{accountId} {
         allow create: if isOwner(uid)
