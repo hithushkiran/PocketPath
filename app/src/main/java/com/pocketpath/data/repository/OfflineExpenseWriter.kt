@@ -291,8 +291,12 @@ class OfflineExpenseWriter @Inject constructor(
     suspend fun reconcile(uid: String) {
         requireCurrent(uid)
 
-        val unresolved = local.read(uid).receipts.filter {
-            it.phase == ReceiptPhase.PREPARED || it.phase == ReceiptPhase.PENDING
+        val unresolved = submitMutex.withLock {
+            requireCurrent(uid)
+            local.read(uid).receipts.filter {
+                it.phase == ReceiptPhase.PREPARED ||
+                    it.phase == ReceiptPhase.PENDING
+            }
         }
         if (unresolved.isEmpty()) return
 

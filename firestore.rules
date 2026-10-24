@@ -12,12 +12,34 @@ service cloud.firestore {
         && data.keys().hasOnly(required.concat(optional));
     }
 
-    function validId(value) {
+    function nonBlank(value) {
       return value is string
-        && value.size() > 0
+        // Unicode separators plus the whitespace controls used by Kotlin isBlank.
+        && !value.matches('[\\x{0009}-\\x{000D}\\x{001C}-\\x{001F}\\p{Z}]*');
+    }
+
+    function validId(value) {
+      return nonBlank(value)
         && value != '.'
         && value != '..'
         && value.matches('[^/]+');
+    }
+
+    function validDateParts(year, month, day) {
+      let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+      let daysInMonth = month == 2
+        ? (leap ? 29 : 28)
+        : (month in [4, 6, 9, 11] ? 30 : 31);
+
+      return month >= 1 && month <= 12
+        && day >= 1 && day <= daysInMonth;
+    }
+
+    function validDate(value) {
+      // Preserve the existing YYYY-MM-DD format without adding a year cutoff.
+      return value is string
+        && value.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && validDateParts(int(value[0:4]), int(value[5:7]), int(value[8:10]));
     }
 
     function supportedCollection(name) {
@@ -77,8 +99,7 @@ service cloud.firestore {
           ],
           ['institutionLabel']
         )
-        && data.name is string
-        && data.name.size() > 0
+        && nonBlank(data.name)
         && data.type in ['CASH', 'BANK', 'FIAT_WALLET']
         && data.currencyCode == 'LKR'
         && data.assetClass == 'FIAT'
@@ -86,14 +107,10 @@ service cloud.firestore {
         && data.scale == 2
         && data.includeInEverydayPool is bool
         && validId(data.openingTransactionId)
-        && data.openedOn is string
-        && data.openedOn.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && validDate(data.openedOn)
         && (
           !('institutionLabel' in data)
-          || (
-            data.institutionLabel is string
-            && data.institutionLabel.size() > 0
-          )
+          || nonBlank(data.institutionLabel)
         )
         && data.createdAt == request.time
         && data.updatedAt == request.time
@@ -110,8 +127,7 @@ service cloud.firestore {
           ],
           ['iconKey']
         )
-        && data.name is string
-        && data.name.size() > 0
+        && nonBlank(data.name)
         && data.defaultCommitmentClass in [
           'COMMITTED', 'DISCRETIONARY', 'UNPLANNED_ESSENTIAL'
         ]
@@ -159,10 +175,8 @@ service cloud.firestore {
         && data.kind in ['OPENING', 'EXPENSE']
         && data.status == 'POSTED'
         && data.occurredAt is timestamp
-        && data.occurredLocalDate is string
-        && data.occurredLocalDate.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
-        && data.recordedTimeZone is string
-        && data.recordedTimeZone.size() > 0
+        && validDate(data.occurredLocalDate)
+        && nonBlank(data.recordedTimeZone)
         && data.clientCreatedAt is timestamp
         && data.createdAt == request.time
         && data.schemaVersion is int
@@ -261,6 +275,7 @@ service cloud.firestore {
       allow list: if false;
 
       allow create: if isOwner(uid)
+        && validId(uid)
         && validDefaultProfile(request.resource.data);
 
       allow update, delete: if false;

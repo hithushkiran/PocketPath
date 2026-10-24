@@ -37,7 +37,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Do not bind this user-owned instance as an application singleton.
  *
  * This initial production adapter supports LKR OPENING and ordinary EXPENSE.
- * Writes currently require authoritative online transactions.
+ * Account creation uses authoritative online transactions; ordinary LKR expenses
+ * support Firestore-managed offline writes.
  */
 class FirebaseFoundationRepository internal constructor(
     private val owned: UserFirestoreScope,
