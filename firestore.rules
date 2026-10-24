@@ -1,0 +1,325 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function fields(data, required, optional) {
+      return data.keys().hasAll(required)
+        && data.keys().hasOnly(required.concat(optional));
+    }
+
+    function nonBlank(value) {
+      return value is string
+        // Unicode separators plus the whitespace controls used by Kotlin isBlank.
+        && !value.matches('[\\x{0009}-\\x{000D}\\x{001C}-\\x{001F}\\p{Z}]*');
+    }
+
+    function validId(value) {
+      return nonBlank(value)
+        && value != '.'
+        && value != '..'
+        && value.matches('[^/]+');
+    }
+
+    function validDateParts(year, month, day) {
+      let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+      let daysInMonth = month == 2
+        ? (leap ? 29 : 28)
+        : (month in [4, 6, 9, 11] ? 30 : 31);
+
+      return month >= 1 && month <= 12
+        && day >= 1 && day <= daysInMonth;
+    }
+
+    function validDate(value) {
+      // Preserve the existing YYYY-MM-DD format without adding a year cutoff.
+      return value is string
+        && value.matches('[0-9]{4}-[0-9]{2}-[0-9]{2}')
+        && validDateParts(int(value[0:4]), int(value[5:7]), int(value[8:10]));
+    }
+
+    function supportedCollection(name) {
+      return name in [
+        'accounts', 'categories', 'incomeSources', 'expectedPayments',
+        'schedules', 'occurrences', 'transactions', 'goals', 'goalPlans',
+        'budgets', 'rateSnapshots', 'cryptoPositions'
+      ];
+    }
+
+    function profilePath(uid) {
+      return /databases/$(database)/documents/users/$(uid);
+    }
+
+    function accountPath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/accounts/$(id);
+    }
+
+    function eventPath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/transactions/$(id);
+    }
+
+    function categoryPath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/categories/$(id);
+    }
+
+    function validDefaultProfile(data) {
+      return fields(
+          data,
+          [
+            'baseCurrency', 'timeZone', 'weekStartsOn',
+            'onboardingCompleted', 'hideBalances', 'remindersEnabled',
+            'schemaVersion', 'createdAt', 'updatedAt'
+          ],
+          []
+        )
+        && data.baseCurrency == 'LKR'
+        && data.timeZone == 'Asia/Colombo'
+        && data.weekStartsOn is int
+        && data.weekStartsOn == 1
+        && data.onboardingCompleted == false
+        && data.hideBalances == false
+        && data.remindersEnabled == true
+        && data.schemaVersion is int
+        && data.schemaVersion == 1
+        && data.createdAt == request.time
+        && data.updatedAt == request.time;
+    }
+
+    function validAccount(data) {
+      return fields(
+          data,
+          [
+            'name', 'type', 'currencyCode', 'assetClass', 'scale',
+            'includeInEverydayPool', 'openingTransactionId', 'openedOn',
+            'createdAt', 'updatedAt', 'revision'
+          ],
+          ['institutionLabel']
+        )
+        && nonBlank(data.name)
+        && data.type in ['CASH', 'BANK', 'FIAT_WALLET']
+        && data.currencyCode == 'LKR'
+        && data.assetClass == 'FIAT'
+        && data.scale is int
+        && data.scale == 2
+        && data.includeInEverydayPool is bool
+        && validId(data.openingTransactionId)
+        && validDate(data.openedOn)
+        && (
+          !('institutionLabel' in data)
+          || nonBlank(data.institutionLabel)
+        )
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.revision is int
+        && data.revision == 0;
+    }
+
+    function validCategory(data) {
+      return fields(
+          data,
+          [
+            'name', 'defaultCommitmentClass', 'sortOrder',
+            'createdAt', 'updatedAt', 'revision'
+          ],
+          ['iconKey']
+        )
+        && nonBlank(data.name)
+        && data.defaultCommitmentClass in [
+          'COMMITTED', 'DISCRETIONARY', 'UNPLANNED_ESSENTIAL'
+        ]
+        && data.sortOrder is int
+        && data.sortOrder >= -2147483648
+        && data.sortOrder <= 2147483647
+        && (
+          !('iconKey' in data)
+          || data.iconKey is string
+        )
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.revision is int
+        && data.revision == 0;
+    }
+
+    function validMovement(movement) {
+      return fields(
+          movement,
+          ['accountId', 'currencyCode', 'assetClass', 'amountMinor'],
+          []
+        )
+        && validId(movement.accountId)
+        && movement.currencyCode == 'LKR'
+        && movement.assetClass == 'FIAT'
+        && movement.amountMinor is int
+        && movement.amountMinor >= -100000000000
+        && movement.amountMinor <= 100000000000;
+    }
+
+    function validEvent(id, data) {
+      return fields(
+          data,
+          [
+            'operationId', 'kind', 'status',
+            'occurredAt', 'occurredLocalDate', 'recordedTimeZone',
+            'clientCreatedAt', 'createdAt', 'schemaVersion', 'revision',
+            'accountIds', 'categoryIds', 'goalIds', 'incomeSourceIds',
+            'movements', 'components', 'reservationEffects', 'valuations'
+          ],
+          ['note', 'merchantLabel']
+        )
+        && validId(id)
+        && data.operationId == id
+        && data.kind in ['OPENING', 'EXPENSE']
+        && data.status == 'POSTED'
+        && data.occurredAt is timestamp
+        && validDate(data.occurredLocalDate)
+        && nonBlank(data.recordedTimeZone)
+        && data.clientCreatedAt is timestamp
+        && data.createdAt == request.time
+        && data.schemaVersion is int
+        && data.schemaVersion == 1
+        && data.revision is int
+        && data.revision == 0
+        && data.movements is list
+        && data.movements.size() == 1
+        && validMovement(data.movements[0])
+        && data.accountIds == [data.movements[0].accountId]
+        && data.components is list
+        && data.categoryIds is list
+        && data.goalIds == []
+        && data.incomeSourceIds == []
+        && data.reservationEffects == []
+        && data.valuations == []
+        && (
+          !('note' in data)
+          || (data.note is string && data.note.size() <= 1000)
+        )
+        && (
+          !('merchantLabel' in data)
+          || (
+            data.merchantLabel is string
+            && data.merchantLabel.size() <= 1000
+          )
+        );
+    }
+
+    function validNewAccount(uid, id, data) {
+      let opening = eventPath(uid, data.openingTransactionId);
+      let afterOpening = getAfter(opening).data;
+
+      return validAccount(data)
+        && validId(id)
+        && getAfter(profilePath(uid)).data.baseCurrency == 'LKR'
+        && !exists(opening)
+        && afterOpening.operationId == data.openingTransactionId
+        && afterOpening.kind == 'OPENING'
+        && afterOpening.status == 'POSTED'
+        && afterOpening.createdAt == request.time
+        && afterOpening.accountIds == [id]
+        && afterOpening.movements.size() == 1
+        && afterOpening.movements[0].accountId == id
+        && afterOpening.occurredLocalDate == data.openedOn;
+    }
+
+    function validOpening(uid, id, data) {
+      let account = accountPath(uid, data.movements[0].accountId);
+      let afterAccount = getAfter(account).data;
+
+      return data.components == []
+        && data.categoryIds == []
+        && !exists(account)
+        && afterAccount.openingTransactionId == id
+        && afterAccount.openedOn == data.occurredLocalDate
+        && afterAccount.currencyCode == 'LKR'
+        && afterAccount.assetClass == 'FIAT'
+        && afterAccount.scale == 2
+        && afterAccount.createdAt == request.time;
+    }
+
+    function validExpense(uid, data) {
+      let movement = data.movements[0];
+      let component = data.components[0];
+      let account = accountPath(uid, movement.accountId);
+      let category = categoryPath(uid, component.categoryId);
+
+      return data.components.size() == 1
+        && fields(
+          component,
+          ['nature', 'amountLkrMinor', 'categoryId', 'commitmentClass'],
+          []
+        )
+        && component.nature == 'SPENDING'
+        && component.amountLkrMinor is int
+        && component.amountLkrMinor > 0
+        && component.amountLkrMinor <= 100000000000
+        && validId(component.categoryId)
+        && component.commitmentClass in [
+          'COMMITTED', 'DISCRETIONARY', 'UNPLANNED_ESSENTIAL'
+        ]
+        && data.categoryIds == [component.categoryId]
+        && movement.amountMinor == -component.amountLkrMinor
+        && exists(account)
+        && get(account).data.currencyCode == 'LKR'
+        && get(account).data.assetClass == 'FIAT'
+        && get(account).data.scale == 2
+        && get(account).data.get('archivedAt', null) == null
+        && exists(category)
+        && get(category).data.get('archivedAt', null) == null;
+    }
+
+    match /users/{uid} {
+      allow get: if isOwner(uid);
+      allow list: if false;
+
+      allow create: if isOwner(uid)
+        && validId(uid)
+        && validDefaultProfile(request.resource.data);
+
+      allow update, delete: if false;
+
+      match /categories/{categoryId} {
+        allow create: if isOwner(uid)
+          && validId(categoryId)
+          && validCategory(request.resource.data);
+
+        allow update, delete: if false;
+      }
+
+      match /accounts/{accountId} {
+        allow create: if isOwner(uid)
+          && validNewAccount(uid, accountId, request.resource.data);
+
+        allow update, delete: if false;
+      }
+
+      match /transactions/{transactionId} {
+        allow create: if isOwner(uid)
+          && validEvent(transactionId, request.resource.data)
+          && (
+            (
+              request.resource.data.kind == 'OPENING'
+              && validOpening(uid, transactionId, request.resource.data)
+            )
+            || (
+              request.resource.data.kind == 'EXPENSE'
+              && validExpense(uid, request.resource.data)
+            )
+          );
+
+        allow update, delete: if false;
+      }
+
+      match /{collectionId}/{documentId} {
+        allow read: if isOwner(uid)
+          && supportedCollection(collectionId);
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

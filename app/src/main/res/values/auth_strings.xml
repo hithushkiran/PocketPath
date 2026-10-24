@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="auth_welcome">Your money, with a clearer plan.</string>
+    <string name="auth_login_title">Sign in</string>
+    <string name="auth_register_title">Create an account</string>
+    <string name="auth_reset_title">Reset your password</string>
+
+    <string name="auth_email">Email</string>
+    <string name="auth_password">Password</string>
+    <string name="auth_confirm_password">Confirm password</string>
+    <string name="auth_show">Show</string>
+    <string name="auth_hide">Hide</string>
+
+    <string name="auth_create_account">Create account</string>
+    <string name="auth_forgot_password">Forgot password?</string>
+    <string name="auth_back_to_login">Back to sign in</string>
+    <string name="auth_send_reset">Send reset email</string>
+    <string name="auth_working">Please wait…</string>
+    <string name="auth_checking">Checking your session…</string>
+
+    <string name="auth_register_help">Use at least 6 characters. Your password must also meet the account password policy.</string>
+    <string name="auth_reset_help">Enter the email address you used to create your account.</string>
+    <string name="auth_reset_sent">If an account exists for this email, password reset instructions will be sent.</string>
+
+    <string name="auth_error_email">Enter a valid email address.</string>
+    <string name="auth_error_password">Enter your password.</string>
+    <string name="auth_error_password_length">Use a password between 6 and 4096 characters.</string>
+    <string name="auth_error_confirmation">Passwords do not match.</string>
+    <string name="auth_error_credentials">Check your email and password, then try again.</string>
+    <string name="auth_error_weak_password">Choose a password that meets the account password policy.</string>
+    <string name="auth_error_account">Unable to create an account with these details. Try signing in or resetting your password.</string>
+    <string name="auth_error_network">Unable to connect. Check your internet connection and try again.</string>
+    <string name="auth_error_rate_limit">Too many attempts. Please wait before trying again.</string>
+    <string name="auth_error_unavailable">Sign-in is currently unavailable. Please try again later.</string>
+    <string name="auth_error_generic">Something went wrong. Please try again.</string>
+
+    <string name="auth_signed_in">Signed in</string>
+    <string name="auth_sign_out">Sign out</string>
+    <string name="auth_signing_out">Signing out…</string>
+    <string name="auth_settings_note">Account and app preferences will be available in later blocks.</string>
+</resources>
