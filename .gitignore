@@ -36,3 +36,4 @@ google-services.json
 *-adminsdk-*.json
 .env
 .env.*
+/app/google-services.json

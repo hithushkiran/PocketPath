@@ -70,7 +70,12 @@ private fun NavDestination?.matches(route: KClass<*>): Boolean = this?.hasRoute(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun PocketPathApp() {
+fun PocketPathApp(
+    email: String? = null,
+    authBusy: Boolean = false,
+    authError: String? = null,
+    onSignOut: () -> Unit = {},
+) {
     val navController = rememberNavController()
     val entry by navController.currentBackStackEntryAsState()
     val destination = entry?.destination
@@ -165,7 +170,14 @@ fun PocketPathApp() {
             composable<Goals> { GoalsScreen() }
             composable<Add> { AddScreen() }
             composable<Accounts> { AccountsScreen() }
-            composable<Settings> { SettingsScreen() }
+            composable<Settings> {
+                SettingsScreen(
+                    email = email,
+                    isSigningOut = authBusy,
+                    errorMessage = authError,
+                    onSignOut = onSignOut,
+                )
+            }
         }
     }
 }

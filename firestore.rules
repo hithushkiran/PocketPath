@@ -1,0 +1,44 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isOwner(uid) {
+      return request.auth != null
+        && request.auth.uid == uid;
+    }
+
+    function isSupportedCollection(name) {
+      return name in [
+        'accounts',
+        'categories',
+        'incomeSources',
+        'expectedPayments',
+        'schedules',
+        'occurrences',
+        'transactions',
+        'goals',
+        'goalPlans',
+        'budgets',
+        'rateSnapshots',
+        'cryptoPositions'
+      ];
+    }
+
+    match /users/{uid} {
+      allow get: if isOwner(uid);
+      allow list, write: if false;
+
+      match /{collectionId}/{documentId} {
+        allow read: if isOwner(uid)
+          && isSupportedCollection(collectionId);
+
+        allow write: if false;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
