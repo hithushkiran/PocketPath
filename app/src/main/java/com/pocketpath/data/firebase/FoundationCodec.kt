@@ -37,6 +37,62 @@ internal object FoundationCodec {
         "schemaVersion", "createdAt", "updatedAt",
     )
 
+    private val incomeSourceRequired = setOf(
+        "name", "kind", "createdAt", "updatedAt", "revision",
+    )
+
+    fun incomeSourceData(source: IncomeSource): Map<String, Any> {
+        checkId(source.id)
+        require(source.metadata == RecordMetadata()) {
+            "New income sources cannot supply server metadata"
+        }
+        require(source.defaultCurrency == null || source.defaultCurrency == FiatCurrency.LKR) {
+            "Income sources are LKR-only in the first increment"
+        }
+        source.defaultAccountId?.let(::checkId)
+
+        return buildMap {
+            put("name", source.name)
+            put("kind", source.kind.name)
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+            put("revision", 0L)
+            source.defaultAccountId?.let { put("defaultAccountId", it) }
+            source.defaultCurrency?.let { put("defaultCurrencyCode", it.code) }
+        }
+    }
+
+    fun incomeSource(
+        id: String,
+        data: FirestoreFields,
+        pending: Boolean = false,
+    ): IncomeSource {
+        checkId(id)
+        data.checkKeys(
+            incomeSourceRequired,
+            setOf("defaultAccountId", "defaultCurrencyCode", "archivedAt"),
+        )
+
+        val currency = data.optionalText("defaultCurrencyCode")?.let { FiatCurrency(it) }
+        require(currency == null || currency == FiatCurrency.LKR) {
+            "Income sources are LKR-only in the first increment"
+        }
+
+        return IncomeSource(
+            id = id,
+            name = data.text("name"),
+            kind = IncomeSourceKind.valueOf(data.text("kind")),
+            defaultAccountId = data.optionalText("defaultAccountId")?.also(::checkId),
+            defaultCurrency = currency,
+            metadata = RecordMetadata(
+                createdAt = if (pending && data["createdAt"] == null) null else data.instant("createdAt"),
+                updatedAt = if (pending && data["updatedAt"] == null) null else data.instant("updatedAt"),
+                revision = data.integer("revision"),
+                archivedAt = data.optionalInstant("archivedAt"),
+            ),
+        )
+    }
+
     fun categoryData(category: Category): Map<String, Any> {
         checkId(category.id)
         require(category.metadata == RecordMetadata())
@@ -354,6 +410,10 @@ internal object FoundationCodec {
     fun sameEvent(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys { it != "createdAt" } ==
             expected.filterKeys { it != "createdAt" }
+
+    fun sameIncomeSource(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
+            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
 
     private fun FirestoreFields.checkKeys(
         required: Set<String>,

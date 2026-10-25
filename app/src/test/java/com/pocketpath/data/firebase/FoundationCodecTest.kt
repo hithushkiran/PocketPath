@@ -5,6 +5,7 @@ import com.pocketpath.data.local.LocalFinanceFile
 import com.pocketpath.data.local.SavedDrafts
 import com.pocketpath.data.local.StoredExpense
 import com.pocketpath.domain.money.EntryAmount
+import com.pocketpath.domain.money.FiatCurrency
 import com.pocketpath.domain.repository.RecordExpenseCommand
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -17,6 +18,8 @@ import com.pocketpath.domain.calculation.periodReportTotals
 import com.pocketpath.domain.model.AccountMovement
 import com.pocketpath.domain.model.ComponentNature
 import com.pocketpath.domain.model.FinancialTransaction
+import com.pocketpath.domain.model.IncomeSource
+import com.pocketpath.domain.model.IncomeSourceKind
 import com.pocketpath.domain.model.ReportComponent
 import com.pocketpath.domain.model.TransactionKind
 import com.pocketpath.domain.model.TransactionStatus
@@ -50,6 +53,61 @@ class FoundationCodecTest {
         ))
         assertEquals(0L, totals.earningsLkrMinor)
         assertEquals(85_000L, totals.netSpendingLkrMinor)
+    }
+
+    @Test fun incomeSourceRoundTripIsLkrOnlyAndReplayIgnoresAuditTimes() {
+        val source = IncomeSource(
+            id = "source-operation",
+            name = "Monthly salary",
+            kind = IncomeSourceKind.SALARY,
+            defaultAccountId = SampleFixtures.cash.id,
+            defaultCurrency = FiatCurrency.LKR,
+        )
+        val stored = FoundationCodec.incomeSourceData(source) + mapOf(
+            "createdAt" to audit,
+            "updatedAt" to audit,
+        )
+
+        assertEquals(source.copy(metadata = source.metadata.copy(createdAt = audit.toDate().toInstant(), updatedAt = audit.toDate().toInstant())),
+            FoundationCodec.incomeSource(source.id, stored))
+        assertTrue(FoundationCodec.sameIncomeSource(
+            stored,
+            stored + mapOf("createdAt" to Timestamp(audit.seconds + 60L, 0), "updatedAt" to Timestamp(audit.seconds + 60L, 0)),
+        ))
+        assertFalse(FoundationCodec.sameIncomeSource(stored, stored + ("name" to "Changed salary")))
+    }
+
+    @Test fun incomeSourceRejectsNonLkrCurrencyAndUnexpectedFields() {
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.incomeSourceData(IncomeSource(
+                id = "usd-source",
+                name = "Foreign income",
+                kind = IncomeSourceKind.OTHER,
+                defaultCurrency = FiatCurrency.USD,
+            ))
+        }
+        val source = IncomeSource("source", "Salary", IncomeSourceKind.SALARY)
+        val stored = FoundationCodec.incomeSourceData(source) + mapOf(
+            "createdAt" to audit,
+            "updatedAt" to audit,
+            "unexpected" to "field",
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.incomeSource(source.id, stored)
+        }
+    }
+
+    @Test fun pendingIncomeSourceAllowsUnresolvedServerAuditTimes() {
+        val source = IncomeSource("source", "Salary", IncomeSourceKind.SALARY)
+        val pending = FoundationCodec.incomeSourceData(source) + mapOf(
+            "createdAt" to null,
+            "updatedAt" to null,
+        )
+
+        assertNull(FoundationCodec.incomeSource(source.id, pending, pending = true).metadata.createdAt)
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.incomeSource(source.id, pending)
+        }
     }
 
     @Test fun replayIgnoresAuditTimesAfterTimestampNormalizationButRejectsChangedAmounts() {

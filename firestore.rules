@@ -144,6 +144,28 @@ service cloud.firestore {
         && data.revision == 0;
     }
 
+    function validIncomeSource(data) {
+      return fields(
+          data,
+          ['name', 'kind', 'createdAt', 'updatedAt', 'revision'],
+          ['defaultAccountId', 'defaultCurrencyCode']
+        )
+        && nonBlank(data.name)
+        && data.kind in ['SALARY', 'FREELANCE', 'ADSENSE', 'CRYPTO', 'OTHER']
+        && (
+          !('defaultAccountId' in data)
+          || validId(data.defaultAccountId)
+        )
+        && (
+          !('defaultCurrencyCode' in data)
+          || data.defaultCurrencyCode == 'LKR'
+        )
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.revision is int
+        && data.revision == 0;
+    }
+
     function validMovement(movement) {
       return fields(
           movement,
@@ -284,6 +306,14 @@ service cloud.firestore {
         allow create: if isOwner(uid)
           && validId(categoryId)
           && validCategory(request.resource.data);
+
+        allow update, delete: if false;
+      }
+
+      match /incomeSources/{sourceId} {
+        allow create: if isOwner(uid)
+          && validId(sourceId)
+          && validIncomeSource(request.resource.data);
 
         allow update, delete: if false;
       }
