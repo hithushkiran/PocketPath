@@ -48,6 +48,9 @@ import com.pocketpath.feature.accounts.AccountsScreen
 import com.pocketpath.feature.activity.ActivityScreen
 import com.pocketpath.feature.goals.GoalsScreen
 import com.pocketpath.feature.home.HomeScreen
+import com.pocketpath.feature.income.ManualIncomeEvent
+import com.pocketpath.feature.income.ManualIncomeScreen
+import com.pocketpath.feature.income.ManualIncomeUiState
 import com.pocketpath.feature.plan.PlanScreen
 import com.pocketpath.feature.settings.SettingsScreen
 import com.pocketpath.feature.transaction.AddScreen
@@ -79,6 +82,8 @@ fun PocketPathApp(
     onSignOut: () -> Unit = {},
     financeState: FinanceUiState = FinanceUiState(),
     onFinanceEvent: (FinanceEvent) -> Unit = {},
+    incomeState: ManualIncomeUiState = ManualIncomeUiState(),
+    onIncomeEvent: (ManualIncomeEvent) -> Unit = {},
 ) {
     val navController = rememberNavController()
     val entry by navController.currentBackStackEntryAsState()
@@ -89,6 +94,7 @@ fun PocketPathApp(
     val title = when {
         destination.matches(Add::class) -> R.string.nav_add
         destination.matches(Accounts::class) -> R.string.nav_accounts
+        destination.matches(RecordIncome::class) -> R.string.nav_record_income
         destination.matches(Settings::class) -> R.string.nav_settings
         else -> selectedTab?.label ?: R.string.nav_home
     }
@@ -210,7 +216,11 @@ fun PocketPathApp(
                 AccountsScreen(
                     state = financeState,
                     onEvent = onFinanceEvent,
+                    onRecordIncome = { navController.navigate(RecordIncome) { launchSingleTop = true } },
                 )
+            }
+            composable<RecordIncome> {
+                ManualIncomeScreen(state = incomeState, onEvent = onIncomeEvent)
             }
             composable<Settings> {
                 SettingsScreen(

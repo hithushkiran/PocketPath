@@ -14,6 +14,7 @@ import com.pocketpath.ui.components.*
 fun AccountsScreen(
     state: FinanceUiState,
     onEvent: (FinanceEvent) -> Unit,
+    onRecordIncome: () -> Unit,
 ) {
     val form = state.accountForm
     val editable = state.canEditDraft && !form.busy && !form.locked && !form.saved
@@ -88,6 +89,10 @@ fun AccountsScreen(
         }
 
         Text("Your accounts", style = MaterialTheme.typography.titleLarge)
+
+        OutlinedButton(onClick = onRecordIncome, modifier = Modifier.fillMaxWidth()) {
+            Text("Record income")
+        }
 
         if (state.ready && state.accounts.isEmpty()) {
             Text("No accounts yet.")

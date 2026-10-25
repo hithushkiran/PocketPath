@@ -2,6 +2,8 @@ package com.pocketpath.feature.auth
 
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.feature.finance.FinanceViewModel
+import com.pocketpath.feature.income.ManualIncomeUiState
+import com.pocketpath.feature.income.ManualIncomeViewModel
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,6 +29,7 @@ import com.pocketpath.navigation.PocketPathApp
 fun AuthRoot(
     viewModel: AuthViewModel,
     financeViewModel: FinanceViewModel,
+    incomeViewModel: ManualIncomeViewModel,
 ) {
     val session by viewModel.session.collectAsStateWithLifecycle()
     val action by viewModel.actionState.collectAsStateWithLifecycle()
@@ -55,12 +58,18 @@ fun AuthRoot(
 
         is AuthSession.SignedIn -> {
             val financeState by financeViewModel.state.collectAsStateWithLifecycle()
+            val incomeState by incomeViewModel.state.collectAsStateWithLifecycle()
 
             // Never render a previous user's state while session observers catch up.
             val visibleFinance = if (financeState.userId == current.user.uid) {
                 financeState
             } else {
                 FinanceUiState(userId = current.user.uid)
+            }
+            val visibleIncome = if (incomeState.userId == current.user.uid) {
+                incomeState
+            } else {
+                ManualIncomeUiState(userId = current.user.uid)
             }
 
             key(current.user.uid) {
@@ -74,7 +83,7 @@ fun AuthRoot(
                         ?.let { stringResource(it) }
                         ?: visibleFinance.localError,
                     onSignOut = {
-                        if (visibleFinance.hasUnresolvedLocalWork) {
+                        if (visibleFinance.hasUnresolvedLocalWork || visibleIncome.hasUnresolvedIncomeWork) {
                             confirmSignOut = true
                         } else {
                             financeViewModel.flushAndSignOut(
@@ -87,6 +96,8 @@ fun AuthRoot(
                     onFinanceEvent = {
                         financeViewModel.onEvent(current.user.uid, it)
                     },
+                    incomeState = visibleIncome,
+                    onIncomeEvent = { incomeViewModel.onEvent(current.user.uid, it) },
                 )
 
                 if (confirmSignOut) {
@@ -94,11 +105,23 @@ fun AuthRoot(
                         onDismissRequest = { confirmSignOut = false },
                         title = { Text("Sign out with local work?") },
                         text = {
-                            Text(
-                                "Drafts and unresolved saves will remain on this device " +
-                                    "for this account. You may need to sign back in to " +
-                                    "finish synchronization.",
-                            )
+                            Text(buildString {
+                                if (visibleFinance.hasUnresolvedLocalWork) {
+                                    append(
+                                        "Drafts and unresolved saves will remain on this device " +
+                                            "for this account. You may need to sign back in to " +
+                                            "finish synchronization.",
+                                    )
+                                }
+                                if (visibleIncome.hasUnresolvedIncomeWork) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append(
+                                        "An uncertain income retry exists only in memory. " +
+                                            "Signing out will discard its retry information, and " +
+                                            "the income transaction may already have been recorded.",
+                                    )
+                                }
+                            })
                         },
                         confirmButton = {
                             TextButton(
