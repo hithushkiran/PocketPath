@@ -83,7 +83,9 @@ fun AuthRoot(
                         ?.let { stringResource(it) }
                         ?: visibleFinance.localError,
                     onSignOut = {
-                        if (visibleFinance.hasUnresolvedLocalWork || visibleIncome.hasUnresolvedIncomeWork) {
+                        if (visibleFinance.hasUnresolvedLocalWork || visibleIncome.hasUnresolvedIncomeWork ||
+                            visibleIncome.hasUnresolvedSourceWork
+                        ) {
                             confirmSignOut = true
                         } else {
                             financeViewModel.flushAndSignOut(
@@ -119,6 +121,14 @@ fun AuthRoot(
                                         "An uncertain income retry exists only in memory. " +
                                             "Signing out will discard its retry information, and " +
                                             "the income transaction may already have been recorded.",
+                                    )
+                                }
+                                if (visibleIncome.hasUnresolvedSourceWork) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append(
+                                        "An uncertain income-source retry exists only in memory. " +
+                                            "Signing out will discard its retry information, and " +
+                                            "the source may already have been created.",
                                     )
                                 }
                             })

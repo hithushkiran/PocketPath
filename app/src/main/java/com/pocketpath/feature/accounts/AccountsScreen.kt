@@ -15,6 +15,7 @@ fun AccountsScreen(
     state: FinanceUiState,
     onEvent: (FinanceEvent) -> Unit,
     onRecordIncome: () -> Unit,
+    onManageIncomeSources: () -> Unit,
 ) {
     val form = state.accountForm
     val editable = state.canEditDraft && !form.busy && !form.locked && !form.saved
@@ -92,6 +93,10 @@ fun AccountsScreen(
 
         OutlinedButton(onClick = onRecordIncome, modifier = Modifier.fillMaxWidth()) {
             Text("Record income")
+        }
+
+        OutlinedButton(onClick = onManageIncomeSources, modifier = Modifier.fillMaxWidth()) {
+            Text("Manage income sources")
         }
 
         if (state.ready && state.accounts.isEmpty()) {

@@ -6,6 +6,7 @@ import com.pocketpath.domain.model.ComponentNature
 import com.pocketpath.domain.model.FinancialTime
 import com.pocketpath.domain.model.FinancialTransaction
 import com.pocketpath.domain.model.IncomeSource
+import com.pocketpath.domain.model.IncomeSourceKind
 import com.pocketpath.domain.model.ReportComponent
 import com.pocketpath.domain.model.TransactionKind
 import com.pocketpath.domain.model.TransactionStatus
@@ -35,12 +36,17 @@ data class ManualIncomeUiState(
     val saved: Boolean = false,
     val replayed: Boolean = false,
     val writeState: WriteState? = null,
+    val sourceManagement: IncomeSourceManagementUiState = IncomeSourceManagementUiState(),
 ) {
     internal fun canStartSave(): Boolean = referencesReady && !busy && !saved
 
     /** A frozen online income request exists only in this ViewModel's memory. */
     val hasUnresolvedIncomeWork: Boolean
         get() = locked && !saved
+
+    /** A frozen online source request exists only in this ViewModel's memory. */
+    val hasUnresolvedSourceWork: Boolean
+        get() = sourceManagement.locked && !sourceManagement.saved
 
     val selectableAccounts: List<Account>
         get() = accounts.filter { it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null }
@@ -52,6 +58,19 @@ data class ManualIncomeUiState(
         }
 }
 
+data class IncomeSourceManagementUiState(
+    val formOpen: Boolean = false,
+    val name: String = "",
+    val kind: IncomeSourceKind = IncomeSourceKind.SALARY,
+    val busy: Boolean = false,
+    val locked: Boolean = false,
+    val saved: Boolean = false,
+    val replayed: Boolean = false,
+    val error: String? = null,
+) {
+    internal fun canStartSave(): Boolean = formOpen && !busy && !saved
+}
+
 sealed interface ManualIncomeEvent {
     data class SourceChanged(val id: String) : ManualIncomeEvent
     data class AccountChanged(val id: String) : ManualIncomeEvent
@@ -60,6 +79,30 @@ sealed interface ManualIncomeEvent {
     data class NoteChanged(val value: String) : ManualIncomeEvent
     data object Save : ManualIncomeEvent
     data object RecordAnother : ManualIncomeEvent
+    data object OpenSourceManagement : ManualIncomeEvent
+    data object CloseSourceManagement : ManualIncomeEvent
+    data class SourceManagementNameChanged(val value: String) : ManualIncomeEvent
+    data class SourceManagementKindChanged(val value: IncomeSourceKind) : ManualIncomeEvent
+    data object SaveSource : ManualIncomeEvent
+    data object CreateAnotherSource : ManualIncomeEvent
+}
+
+/** Shared with JVM tests so source validation and retained identity stay outside Compose. */
+internal object IncomeSourceFactory {
+    fun create(
+        operationId: String,
+        nameText: String,
+        kind: IncomeSourceKind,
+    ): IncomeSource {
+        val name = nameText.trim()
+        require(name.isNotBlank()) { "Enter an income source name." }
+        return IncomeSource(
+            id = operationId,
+            name = name,
+            kind = kind,
+            defaultCurrency = FiatCurrency.LKR,
+        )
+    }
 }
 
 /** Shared with JVM tests so form validation and exact event construction stay outside Compose. */

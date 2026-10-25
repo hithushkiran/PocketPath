@@ -46,7 +46,9 @@ class ManualIncomeViewModel @Inject constructor(
     private var incomeRepository: IncomeRepository? = null
     private var zone = ZoneId.of("Asia/Colombo")
     private var frozenEvent: FinancialTransaction? = null
+    private var frozenSource: IncomeSource? = null
     private var writeJob: Job? = null
+    private var sourceWriteJob: Job? = null
 
     init {
         viewModelScope.launch {
@@ -54,9 +56,11 @@ class ManualIncomeViewModel @Inject constructor(
                 val epoch = ++generation
                 sessionScope?.cancel()
                 writeJob?.cancel()
+                sourceWriteJob?.cancel()
                 sessionScope = null
                 incomeRepository = null
                 frozenEvent = null
+                frozenSource = null
                 activeUserId = null
                 zone = ZoneId.of("Asia/Colombo")
 
@@ -110,6 +114,16 @@ class ManualIncomeViewModel @Inject constructor(
             is ManualIncomeEvent.NoteChanged -> edit { it.copy(note = event.value) }
             ManualIncomeEvent.Save -> save()
             ManualIncomeEvent.RecordAnother -> recordAnother()
+            ManualIncomeEvent.OpenSourceManagement -> openSourceManagement()
+            ManualIncomeEvent.CloseSourceManagement -> closeSourceManagement()
+            is ManualIncomeEvent.SourceManagementNameChanged -> editSourceManagement {
+                it.copy(name = event.value)
+            }
+            is ManualIncomeEvent.SourceManagementKindChanged -> editSourceManagement {
+                it.copy(kind = event.value)
+            }
+            ManualIncomeEvent.SaveSource -> saveSource()
+            ManualIncomeEvent.CreateAnotherSource -> createAnotherSource()
         }
     }
 
@@ -239,6 +253,106 @@ class ManualIncomeViewModel @Inject constructor(
                 writeState = null,
                 error = null,
             )
+        }
+    }
+
+    private fun openSourceManagement() {
+        _state.update { current ->
+            current.copy(sourceManagement = current.sourceManagement.copy(formOpen = true))
+        }
+    }
+
+    private fun closeSourceManagement() {
+        _state.update { current ->
+            if (current.sourceManagement.busy) current
+            else current.copy(sourceManagement = current.sourceManagement.copy(formOpen = false))
+        }
+    }
+
+    private fun editSourceManagement(change: (IncomeSourceManagementUiState) -> IncomeSourceManagementUiState) {
+        val current = _state.value.sourceManagement
+        if (current.busy || current.locked || current.saved) return
+        _state.update { state ->
+            state.copy(sourceManagement = change(state.sourceManagement).copy(error = null, replayed = false))
+        }
+    }
+
+    private fun saveSource() {
+        val current = _state.value
+        val form = current.sourceManagement
+        if (!form.canStartSave()) return
+        val repository = incomeRepository ?: return
+        val scope = sessionScope ?: return
+        val epoch = generation
+        val source = frozenSource ?: try {
+            IncomeSourceFactory.create(
+                operationId = UUID.randomUUID().toString(),
+                nameText = form.name,
+                kind = form.kind,
+            )
+        } catch (error: Exception) {
+            _state.update { state ->
+                state.copy(sourceManagement = state.sourceManagement.copy(
+                    error = error.message ?: "Enter a valid income source name.",
+                ))
+            }
+            return
+        }
+
+        frozenSource = source
+        _state.update { state ->
+            state.copy(sourceManagement = state.sourceManagement.copy(busy = true, locked = true, error = null))
+        }
+        sourceWriteJob = scope.launch {
+            try {
+                when (val result = repository.saveSource(source.id, source)) {
+                    is CommandResult.Accepted -> if (epoch == generation) {
+                        _state.update { state ->
+                            state.copy(sourceManagement = state.sourceManagement.copy(
+                                busy = false,
+                                locked = true,
+                                saved = true,
+                                replayed = result.replayed,
+                                error = null,
+                            ))
+                        }
+                    }
+                    is CommandResult.Rejected -> handleSourceRejected(epoch, result.failure.code, result.failure.message)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (epoch == generation) {
+                    _state.update { state ->
+                        state.copy(sourceManagement = state.sourceManagement.copy(
+                            busy = false,
+                            locked = true,
+                            error = "Save not confirmed. Reconnect and retry.",
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    private fun handleSourceRejected(epoch: Int, code: FailureCode, message: String) {
+        if (epoch != generation) return
+        val uncertain = code == FailureCode.NETWORK || code == FailureCode.REJECTED
+        if (!uncertain) frozenSource = null
+        _state.update { state ->
+            state.copy(sourceManagement = state.sourceManagement.copy(
+                busy = false,
+                locked = uncertain,
+                error = message,
+            ))
+        }
+    }
+
+    private fun createAnotherSource() {
+        if (!_state.value.sourceManagement.saved) return
+        frozenSource = null
+        _state.update { state ->
+            state.copy(sourceManagement = IncomeSourceManagementUiState(formOpen = true))
         }
     }
 
