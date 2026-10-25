@@ -20,16 +20,19 @@ class InMemoryFinanceRepository(
     override val userId: String,
     private val clock: Clock,
     initialCategories: List<Category> = emptyList(),
-) : AccountRepository, LedgerRepository, CategoryRepository {
+) : AccountRepository, LedgerRepository, CategoryRepository, BudgetRepository {
     private data class Snapshot(
         val accounts: Map<String, Account> = emptyMap(),
         val events: Map<String, FinancialTransaction> = emptyMap(),
-        val categories: Map<String, Category>, val revision: Long = 0,
+        val categories: Map<String, Category>,
+        val budgets: Map<String, Budget> = emptyMap(),
+        val revision: Long = 0,
     )
     private sealed interface Applied {
         data class AccountCreated(val command: CreateAccountCommand, val value: Account) : Applied
         data class ExpenseRecorded(val command: RecordExpenseCommand, val value: FinancialTransaction) : Applied
         data class CategorySaved(val category: Category) : Applied
+        data class BudgetSaved(val budget: Budget) : Applied
     }
     private val mutex = Mutex()
     private val applied = mutableMapOf<String, Applied>()
@@ -148,6 +151,31 @@ class InMemoryFinanceRepository(
             applied[operationId] = Applied.CategorySaved(category)
             state.value = state.value.copy(categories = state.value.categories + (category.id to category), revision = state.value.revision + 1)
             CommandResult.Accepted(category, WriteState.LOCAL_SAVED)
+        } catch (error: IllegalArgumentException) { invalid(operationId, error) }
+        catch (error: ArithmeticException) { invalid(operationId, error) }
+    }
+
+    override fun observeBudgets(): Flow<Observation<List<Budget>>> = state.map { data(it.budgets.values.sortedBy(Budget::id)) }
+
+    override suspend fun saveBudget(operationId: String, budget: Budget): CommandResult<Budget> = mutex.withLock {
+        val previous = applied[operationId]
+        if (previous != null) return@withLock if (previous is Applied.BudgetSaved && previous.budget == budget)
+            CommandResult.Accepted(previous.budget, WriteState.LOCAL_SAVED, true) else conflict(operationId)
+        try {
+            checkId(operationId)
+            checkId(budget.id)
+            require(budget.limit.money.currency == FiatCurrency.LKR)
+            require(budget.limit.money.minor > 0L)
+            require(!budget.rolloverEnabled)
+            if (budget.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+                require(!budget.categoryId.isNullOrBlank())
+                checkId(budget.categoryId)
+            } else {
+                require(budget.categoryId == null)
+            }
+            applied[operationId] = Applied.BudgetSaved(budget)
+            state.value = state.value.copy(budgets = state.value.budgets + (budget.id to budget), revision = state.value.revision + 1)
+            CommandResult.Accepted(budget, WriteState.LOCAL_SAVED)
         } catch (error: IllegalArgumentException) { invalid(operationId, error) }
         catch (error: ArithmeticException) { invalid(operationId, error) }
     }

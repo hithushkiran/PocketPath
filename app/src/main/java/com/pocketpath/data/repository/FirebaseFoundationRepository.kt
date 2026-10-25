@@ -46,7 +46,7 @@ class FirebaseFoundationRepository internal constructor(
     private val firestore: FirebaseFirestore,
     private val local: com.pocketpath.data.local.FinanceLocalStore,
     private val offlineWriter: OfflineExpenseWriter,
-) : AccountRepository, LedgerRepository {
+) : AccountRepository, LedgerRepository, CategoryRepository, BudgetRepository {
 
     @Volatile
     private var preferCachedActivity = true
@@ -64,6 +64,9 @@ class FirebaseFoundationRepository internal constructor(
 
     private val categories
         get() = owned.collection(UserCollection.CATEGORIES)
+
+    private val budgets
+        get() = owned.collection(UserCollection.BUDGETS)
 
     internal fun closeSession() {
         if (active.compareAndSet(true, false)) {
@@ -172,7 +175,7 @@ class FirebaseFoundationRepository internal constructor(
         )
     }
 
-    fun observeCategories(): Flow<Observation<List<Category>>> =
+    override fun observeCategories(): Flow<Observation<List<Category>>> =
         observeQuery(
             query = { categories.limit(5001) },
             completeHistory = false,
@@ -183,6 +186,100 @@ class FirebaseFoundationRepository internal constructor(
                 FoundationCodec.category(it.id, requireNotNull(it.data))
             }.sortedWith(compareBy(Category::sortOrder, Category::id))
         }
+
+    override suspend fun saveCategory(
+        operationId: String,
+        category: Category,
+    ): CommandResult<Category> = command(operationId) {
+        FoundationCodec.checkId(operationId)
+        FoundationCodec.checkId(category.id)
+        require(category.name.isNotBlank() && category.name.length <= 80)
+
+        val categoryData = FoundationCodec.categoryData(category)
+        val reference = categories.document(category.id)
+
+        val result = firestore.runTransaction { transaction ->
+            requireSession()
+            val existing = transaction.get(reference)
+
+            if (existing.exists()) {
+                val existingData = requireNotNull(existing.data)
+                val matches = FoundationCodec.sameCategory(existingData, categoryData)
+                if (!matches) throw conflict()
+
+                Applied(
+                    FoundationCodec.category(existing.id, existingData),
+                    replayed = true,
+                )
+            } else {
+                transaction.set(reference, categoryData)
+                Applied(category)
+            }
+        }.await()
+
+        CommandResult.Accepted(
+            value = result.value,
+            writeState = WriteState.CLOUD_CONFIRMED,
+            replayed = result.replayed,
+        )
+    }
+
+    override fun observeBudgets(): Flow<Observation<List<Budget>>> =
+        observeQuery(
+            query = { budgets.limit(5001) },
+            completeHistory = false,
+            coverageKey = "budgets-v1",
+        ) { snapshot ->
+            checkLimit(snapshot)
+            snapshot.documents.map {
+                FoundationCodec.budget(it.id, requireNotNull(it.data))
+            }.sortedBy { it.id }
+        }
+
+    override suspend fun saveBudget(
+        operationId: String,
+        budget: Budget,
+    ): CommandResult<Budget> = command(operationId) {
+        FoundationCodec.checkId(operationId)
+        FoundationCodec.checkId(budget.id)
+        require(budget.limit.money.currency == FiatCurrency.LKR)
+        require(budget.limit.money.minor > 0L)
+        require(!budget.rolloverEnabled)
+        if (budget.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+            require(!budget.categoryId.isNullOrBlank())
+            FoundationCodec.checkId(budget.categoryId)
+        } else {
+            require(budget.categoryId == null)
+        }
+
+        val budgetData = FoundationCodec.budgetData(budget)
+        val reference = budgets.document(budget.id)
+
+        val result = firestore.runTransaction { transaction ->
+            requireSession()
+            val existing = transaction.get(reference)
+
+            if (existing.exists()) {
+                val existingData = requireNotNull(existing.data)
+                val matches = FoundationCodec.sameBudget(existingData, budgetData)
+                if (!matches) throw conflict()
+
+                Applied(
+                    FoundationCodec.budget(existing.id, existingData),
+                    replayed = true,
+                )
+            } else {
+                transaction.set(reference, budgetData)
+                Applied(budget)
+            }
+        }.await()
+
+        CommandResult.Accepted(
+            value = result.value,
+            writeState = WriteState.CLOUD_CONFIRMED,
+            replayed = result.replayed,
+        )
+    }
 
     override fun observeAccounts(): Flow<Observation<List<Account>>> =
         observeQuery(
