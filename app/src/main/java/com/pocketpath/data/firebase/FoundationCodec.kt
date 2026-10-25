@@ -256,7 +256,7 @@ internal object FoundationCodec {
 
     fun eventData(event: FinancialTransaction): Map<String, Any> {
         checkId(event.id)
-        require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE))
+        require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME))
         require(event.status == TransactionStatus.POSTED && event.revision == 0L)
         require(event.movements.size == 1)
         require(event.reservationEffects.isEmpty() && event.valuations.isEmpty())
@@ -271,21 +271,29 @@ internal object FoundationCodec {
             ?: error("Only fiat movements are supported by this adapter")
         require(amount.money.currency == FiatCurrency.LKR)
 
-        val componentData = event.components.map { component ->
-            require(component.nature == ComponentNature.SPENDING)
-            require(component.originalAmount == null && component.valuationRate == null)
-            require(component.rateSnapshotId == null && component.incomeSourceId == null)
-
-            val amountLkr = component.lkrAmount as? KnownLkrAmount.Known
-                ?: error("Ordinary spending must have a known amount")
-            val categoryId = requireNotNull(component.categoryId).also(::checkId)
-
-            mapOf(
-                "nature" to component.nature.name,
-                "amountLkrMinor" to amountLkr.amount.minor,
-                "categoryId" to categoryId,
-                "commitmentClass" to requireNotNull(component.commitmentClass).name,
-            )
+        val componentData = when (event.kind) {
+            TransactionKind.INCOME -> {
+                require(event.components.size == 1 && amount.money.minor > 0)
+                require(event.merchantLabel == null)
+                val component = event.components.single()
+                require(component.nature == ComponentNature.EARNING)
+                require(component.categoryId == null && component.commitmentClass == null)
+                require(component.originalAmount == null && component.valuationRate == null && component.rateSnapshotId == null)
+                val sourceId = requireNotNull(component.incomeSourceId).also(::checkId)
+                val amountLkr = component.lkrAmount as? KnownLkrAmount.Known
+                    ?: error("Manual income must have a known LKR amount")
+                require(amountLkr.amount == amount.money)
+                listOf(mapOf("nature" to component.nature.name, "amountLkrMinor" to amountLkr.amount.minor, "incomeSourceId" to sourceId))
+            }
+            else -> event.components.map { component ->
+                require(component.nature == ComponentNature.SPENDING)
+                require(component.originalAmount == null && component.valuationRate == null)
+                require(component.rateSnapshotId == null && component.incomeSourceId == null)
+                val amountLkr = component.lkrAmount as? KnownLkrAmount.Known
+                    ?: error("Ordinary spending must have a known amount")
+                val categoryId = requireNotNull(component.categoryId).also(::checkId)
+                mapOf("nature" to component.nature.name, "amountLkrMinor" to amountLkr.amount.minor, "categoryId" to categoryId, "commitmentClass" to requireNotNull(component.commitmentClass).name)
+            }
         }
 
         return buildMap {
@@ -335,7 +343,7 @@ internal object FoundationCodec {
         require(data.text("status") == "POSTED")
 
         val kind = TransactionKind.valueOf(data.text("kind"))
-        require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE)) {
+        require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME)) {
             "Unsupported transaction kind: $kind"
         }
         require(data.list("reservationEffects").isEmpty())
@@ -355,21 +363,16 @@ internal object FoundationCodec {
         }
 
         val components = data.maps("components").map { component ->
-            component.checkKeys(
-                setOf("nature", "amountLkrMinor", "categoryId", "commitmentClass"),
-            )
-            require(component.text("nature") == "SPENDING")
-
-            ReportComponent(
-                nature = ComponentNature.SPENDING,
-                lkrAmount = KnownLkrAmount.Known(
-                    Money.lkr(component.integer("amountLkrMinor")),
-                ),
-                categoryId = component.text("categoryId").also(::checkId),
-                commitmentClass = CommitmentClass.valueOf(
-                    component.text("commitmentClass"),
-                ),
-            )
+            val amountLkr = KnownLkrAmount.Known(Money.lkr(component.integer("amountLkrMinor")))
+            if (kind == TransactionKind.INCOME) {
+                component.checkKeys(setOf("nature", "amountLkrMinor", "incomeSourceId"))
+                require(component.text("nature") == "EARNING")
+                ReportComponent(ComponentNature.EARNING, amountLkr, incomeSourceId = component.text("incomeSourceId").also(::checkId))
+            } else {
+                component.checkKeys(setOf("nature", "amountLkrMinor", "categoryId", "commitmentClass"))
+                require(component.text("nature") == "SPENDING")
+                ReportComponent(ComponentNature.SPENDING, amountLkr, categoryId = component.text("categoryId").also(::checkId), commitmentClass = CommitmentClass.valueOf(component.text("commitmentClass")))
+            }
         }
 
         val result = FinancialTransaction(
@@ -394,6 +397,13 @@ internal object FoundationCodec {
         )
 
         require(result.movements.size == 1)
+        if (kind == TransactionKind.INCOME) {
+            val movement = result.movements.single().amount as NativeAmount.Fiat
+            val component = result.components.single()
+            require(movement.money.currency == FiatCurrency.LKR && movement.money.minor > 0)
+            require(component.nature == ComponentNature.EARNING && (component.lkrAmount as KnownLkrAmount.Known).amount == movement.money)
+            require(result.merchantLabel == null)
+        }
         require(result.merchantLabel == null || result.merchantLabel.length <= 1000)
         require(result.accountIds == data.strings("accountIds"))
         require(result.categoryIds == data.strings("categoryIds"))

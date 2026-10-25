@@ -144,6 +144,10 @@ service cloud.firestore {
         && data.revision == 0;
     }
 
+    function incomeSourcePath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/incomeSources/$(id);
+    }
+
     function validIncomeSource(data) {
       return fields(
           data,
@@ -194,7 +198,7 @@ service cloud.firestore {
         )
         && validId(id)
         && data.operationId == id
-        && data.kind in ['OPENING', 'EXPENSE']
+        && data.kind in ['OPENING', 'EXPENSE', 'INCOME']
         && data.status == 'POSTED'
         && data.occurredAt is timestamp
         && validDate(data.occurredLocalDate)
@@ -212,7 +216,6 @@ service cloud.firestore {
         && data.components is list
         && data.categoryIds is list
         && data.goalIds == []
-        && data.incomeSourceIds == []
         && data.reservationEffects == []
         && data.valuations == []
         && (
@@ -252,6 +255,7 @@ service cloud.firestore {
 
       return data.components == []
         && data.categoryIds == []
+        && data.incomeSourceIds == []
         && !exists(account)
         && afterAccount.openingTransactionId == id
         && afterAccount.openedOn == data.occurredLocalDate
@@ -282,6 +286,7 @@ service cloud.firestore {
           'COMMITTED', 'DISCRETIONARY', 'UNPLANNED_ESSENTIAL'
         ]
         && data.categoryIds == [component.categoryId]
+        && data.incomeSourceIds == []
         && movement.amountMinor == -component.amountLkrMinor
         && exists(account)
         && get(account).data.currencyCode == 'LKR'
@@ -290,6 +295,32 @@ service cloud.firestore {
         && get(account).data.get('archivedAt', null) == null
         && exists(category)
         && get(category).data.get('archivedAt', null) == null;
+    }
+
+    function validIncome(uid, data) {
+      let movement = data.movements[0];
+      let component = data.components[0];
+      let account = accountPath(uid, movement.accountId);
+      let source = incomeSourcePath(uid, component.incomeSourceId);
+      return data.components.size() == 1
+        && fields(component, ['nature', 'amountLkrMinor', 'incomeSourceId'], [])
+        && component.nature == 'EARNING'
+        && component.amountLkrMinor is int
+        && component.amountLkrMinor > 0
+        && component.amountLkrMinor <= 100000000000
+        && validId(component.incomeSourceId)
+        && data.categoryIds == []
+        && data.incomeSourceIds == [component.incomeSourceId]
+        && !('merchantLabel' in data)
+        && movement.amountMinor == component.amountLkrMinor
+        && exists(account)
+        && get(account).data.currencyCode == 'LKR'
+        && get(account).data.assetClass == 'FIAT'
+        && get(account).data.scale == 2
+        && get(account).data.get('archivedAt', null) == null
+        && exists(source)
+        && get(source).data.get('archivedAt', null) == null
+        && (!('defaultCurrencyCode' in get(source).data) || get(source).data.defaultCurrencyCode == 'LKR');
     }
 
     match /users/{uid} {
@@ -336,6 +367,10 @@ service cloud.firestore {
             || (
               request.resource.data.kind == 'EXPENSE'
               && validExpense(uid, request.resource.data)
+            )
+            || (
+              request.resource.data.kind == 'INCOME'
+              && validIncome(uid, request.resource.data)
             )
           );
 

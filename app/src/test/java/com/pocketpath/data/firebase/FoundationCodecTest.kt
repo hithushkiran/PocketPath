@@ -55,6 +55,64 @@ class FoundationCodecTest {
         assertEquals(85_000L, totals.netSpendingLkrMinor)
     }
 
+    @Test fun manualLkrIncomeRoundTripIncreasesBalanceAndEarnings() {
+        val income = FinancialTransaction(
+            operationId = "income-operation",
+            kind = TransactionKind.INCOME,
+            status = TransactionStatus.POSTED,
+            financialTime = SampleFixtures.time,
+            clientCreatedAt = SampleFixtures.instant,
+            movements = listOf(AccountMovement(SampleFixtures.cash.id, NativeAmount.Fiat(Money.lkr(125_001L)))),
+            components = listOf(ReportComponent(
+                nature = ComponentNature.EARNING,
+                lkrAmount = KnownLkrAmount.Known(Money.lkr(125_001L)),
+                incomeSourceId = "salary-source",
+            )),
+            note = "October salary",
+        )
+        val decoded = FoundationCodec.event(income.id, stored(income))
+        val opening = event(SampleFixtures.cash.openingTransactionId, TransactionKind.OPENING, 1_000_000L)
+        val ledger = CompleteLedger(listOf(opening, decoded))
+
+        assertEquals(1_125_001L, (accountBalance(SampleFixtures.cash, ledger).units as BalanceUnits.Fiat).minor)
+        assertEquals(125_001L, periodReportTotals(ledger, ReportPeriod(
+            SampleFixtures.time.occurredLocalDate,
+            SampleFixtures.time.occurredLocalDate,
+            SampleFixtures.time.recordedTimeZone,
+        )).earningsLkrMinor)
+        assertEquals(listOf("salary-source"), decoded.incomeSourceIds)
+    }
+
+    @Test fun manualIncomeRejectsForeignAndMalformedPayloads() {
+        assertThrows(IllegalArgumentException::class.java) {
+            FinancialTransaction(
+                "foreign-income", TransactionKind.INCOME, TransactionStatus.POSTED,
+                SampleFixtures.time, SampleFixtures.instant,
+                listOf(AccountMovement(SampleFixtures.cash.id, NativeAmount.Fiat(Money.parse("1", FiatCurrency.USD)))),
+                listOf(ReportComponent(ComponentNature.EARNING, KnownLkrAmount.Known(Money.lkr(1)), incomeSourceId = "source")),
+            ).also(FoundationCodec::eventData)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            ReportComponent(ComponentNature.EARNING, KnownLkrAmount.Known(Money.lkr(1)))
+        }
+        val valid = FinancialTransaction(
+            "income", TransactionKind.INCOME, TransactionStatus.POSTED, SampleFixtures.time, SampleFixtures.instant,
+            listOf(AccountMovement(SampleFixtures.cash.id, NativeAmount.Fiat(Money.lkr(1)))),
+            listOf(ReportComponent(ComponentNature.EARNING, KnownLkrAmount.Known(Money.lkr(1)), incomeSourceId = "source")),
+        )
+        val stored = stored(valid)
+        val component = (stored.getValue("components") as List<*>).single() as Map<*, *>
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.event(valid.id, stored + ("components" to listOf(component + ("categoryId" to "food"))))
+        }
+        assertFalse(FoundationCodec.sameEvent(stored, stored + ("movements" to listOf(
+            ((stored.getValue("movements") as List<*>).single() as Map<*, *>) + ("amountMinor" to 2L),
+        ))))
+        assertFalse(FoundationCodec.sameEvent(stored, stored + ("incomeSourceIds" to listOf("other-source"))))
+        assertFalse(FoundationCodec.sameEvent(stored, stored + ("accountIds" to listOf("other-account"))))
+        assertFalse(FoundationCodec.sameEvent(stored, stored + ("occurredLocalDate" to "2026-10-25")))
+    }
+
     @Test fun incomeSourceRoundTripIsLkrOnlyAndReplayIgnoresAuditTimes() {
         val source = IncomeSource(
             id = "source-operation",
