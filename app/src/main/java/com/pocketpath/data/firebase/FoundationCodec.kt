@@ -37,6 +37,11 @@ internal object FoundationCodec {
         "schemaVersion", "createdAt", "updatedAt",
     )
 
+    private val budgetRequired = setOf(
+        "scope", "periodType", "limitLkrMinor", "effectiveFrom",
+        "rolloverEnabled", "state", "createdAt", "updatedAt", "revision",
+    )
+
     fun categoryData(category: Category): Map<String, Any> {
         checkId(category.id)
         require(category.metadata == RecordMetadata())
@@ -347,6 +352,75 @@ internal object FoundationCodec {
         return result
     }
 
+    fun budgetData(budget: Budget): Map<String, Any> {
+        checkId(budget.id)
+        require(budget.limit.money.currency == FiatCurrency.LKR)
+        require(budget.limit.money.minor > 0L)
+        require(!budget.rolloverEnabled)
+        if (budget.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+            require(!budget.categoryId.isNullOrBlank()) {
+                "Category discretionary budget requires a category ID"
+            }
+            checkId(budget.categoryId)
+        } else {
+            require(budget.categoryId == null)
+        }
+
+        return buildMap {
+            put("scope", budget.scope.name)
+            put("periodType", budget.periodType.name)
+            put("limitLkrMinor", budget.limit.money.minor)
+            put("effectiveFrom", budget.effectiveFrom.toString())
+            put("rolloverEnabled", false)
+            put("state", budget.state.name)
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+            put("revision", budget.metadata.revision)
+            budget.effectiveTo?.let { put("effectiveTo", it.toString()) }
+            budget.categoryId?.let { put("categoryId", it) }
+        }
+    }
+
+    fun budget(id: String, data: FirestoreFields): Budget {
+        checkId(id)
+        data.checkKeys(
+            budgetRequired,
+            setOf("effectiveTo", "categoryId"),
+        )
+        val limitMinor = data.integer("limitLkrMinor")
+        require(limitMinor > 0L)
+
+        val scope = BudgetScope.valueOf(data.text("scope"))
+        val periodType = BudgetPeriod.valueOf(data.text("periodType"))
+        val categoryId = data.optionalText("categoryId")
+        if (scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+            require(!categoryId.isNullOrBlank())
+            checkId(categoryId)
+        } else {
+            require(categoryId == null)
+        }
+
+        val effectiveFrom = LocalDate.parse(data.text("effectiveFrom"))
+        val effectiveTo = data.optionalText("effectiveTo")?.let(LocalDate::parse)
+
+        return Budget(
+            id = id,
+            scope = scope,
+            periodType = periodType,
+            limit = EntryAmount(Money.lkr(limitMinor)),
+            effectiveFrom = effectiveFrom,
+            effectiveTo = effectiveTo,
+            categoryId = categoryId,
+            rolloverEnabled = data.boolean("rolloverEnabled"),
+            state = BudgetState.valueOf(data.text("state")),
+            metadata = RecordMetadata(
+                createdAt = data.instant("createdAt"),
+                updatedAt = data.instant("updatedAt"),
+                revision = data.integer("revision"),
+            ),
+        )
+    }
+
     fun sameAccount(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
             expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
@@ -354,6 +428,14 @@ internal object FoundationCodec {
     fun sameEvent(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys { it != "createdAt" } ==
             expected.filterKeys { it != "createdAt" }
+
+    fun sameCategory(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
+            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
+
+    fun sameBudget(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
+            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
 
     private fun FirestoreFields.checkKeys(
         required: Set<String>,
