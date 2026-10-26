@@ -206,13 +206,15 @@ internal object FoundationCodec {
     fun eventData(event: FinancialTransaction): Map<String, Any> {
         checkId(event.id)
         require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE))
-        require(event.status == TransactionStatus.POSTED && event.revision == 0L)
+        require(event.revision == 0L)
+        require((event.status == TransactionStatus.VOIDED) == (event.voidMetadata != null))
         require(event.movements.size == 1)
         require(event.reservationEffects.isEmpty() && event.valuations.isEmpty())
         require(event.occurrenceId == null && event.expectedPaymentId == null)
         require(event.originalTransactionId == null && event.goalPlanId == null)
-        require(event.replacesTransactionId == null && event.cryptoTrade == null)
+        require(event.cryptoTrade == null)
         require(event.merchantLabel == null || event.merchantLabel.length <= 1000)
+        event.replacesTransactionId?.let { checkId(it) }
 
         val movement = event.movements.single()
         checkId(movement.accountId)
@@ -268,6 +270,16 @@ internal object FoundationCodec {
             put("valuations", emptyList<Any>())
             event.note?.let { put("note", it) }
             event.merchantLabel?.let { put("merchantLabel", it) }
+            event.replacesTransactionId?.let { put("replacesTransactionId", it) }
+            event.voidMetadata?.let { voidMeta ->
+                put(
+                    "voidMetadata",
+                    mapOf(
+                        "voidedAt" to timestamp(voidMeta.voidedAt),
+                        "voidReason" to voidMeta.voidReason,
+                    ),
+                )
+            }
         }
     }
 
@@ -277,11 +289,31 @@ internal object FoundationCodec {
         pending: Boolean = false,
     ): FinancialTransaction {
         checkId(id)
-        data.checkKeys(eventRequired, setOf("note", "merchantLabel"))
+        data.checkKeys(
+            eventRequired,
+            setOf("note", "merchantLabel", "voidMetadata", "replacesTransactionId"),
+        )
         require(data.text("operationId") == id)
         require(data.integer("schemaVersion") == 1L)
         require(data.integer("revision") == 0L)
-        require(data.text("status") == "POSTED")
+
+        val status = TransactionStatus.valueOf(data.text("status"))
+        require(status in setOf(TransactionStatus.POSTED, TransactionStatus.VOIDED))
+
+        val voidMetaMap = data.optionalMap("voidMetadata")
+        val voidMetadata = if (status == TransactionStatus.VOIDED) {
+            requireNotNull(voidMetaMap) { "Voided transactions require voidMetadata" }
+            voidMetaMap.checkKeys(setOf("voidedAt", "voidReason"))
+            val voidedAt = voidMetaMap.instant("voidedAt")
+            val voidReason = voidMetaMap.text("voidReason")
+            require(voidReason.isNotBlank() && voidReason.length <= 1000)
+            VoidMetadata(voidedAt, voidReason)
+        } else {
+            require(voidMetaMap == null) { "Posted transactions must not have voidMetadata" }
+            null
+        }
+
+        val replacesTransactionId = data.optionalText("replacesTransactionId")?.also(::checkId)
 
         val kind = TransactionKind.valueOf(data.text("kind"))
         require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE)) {
@@ -324,7 +356,7 @@ internal object FoundationCodec {
         val result = FinancialTransaction(
             operationId = id,
             kind = kind,
-            status = TransactionStatus.POSTED,
+            status = status,
             financialTime = FinancialTime(
                 occurredAt = data.instant("occurredAt"),
                 occurredLocalDate = LocalDate.parse(data.text("occurredLocalDate")),
@@ -335,6 +367,8 @@ internal object FoundationCodec {
             components = components,
             note = data.optionalText("note"),
             merchantLabel = data.optionalText("merchantLabel"),
+            replacesTransactionId = replacesTransactionId,
+            voidMetadata = voidMetadata,
             createdAt = if (pending && data["createdAt"] == null) {
                 null
             } else {
@@ -500,4 +534,15 @@ internal object FoundationCodec {
                 key to entry.value
             }
         }
+
+    private fun FirestoreFields.optionalMap(name: String): FirestoreFields? {
+        if (name !in this || this[name] == null) return null
+        val value = this[name]
+        require(value is Map<*, *>) { "Expected a map field: $name" }
+        return value.entries.associate { entry ->
+            val key = entry.key
+            require(key is String)
+            key to entry.value
+        }
+    }
 }
