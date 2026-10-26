@@ -33,6 +33,7 @@ class InMemoryFinanceRepository(
         data class ExpenseRecorded(val command: RecordExpenseCommand, val value: FinancialTransaction) : Applied
         data class CategorySaved(val category: Category) : Applied
         data class BudgetSaved(val budget: Budget) : Applied
+        data class ExpenseVoided(val value: FinancialTransaction) : Applied
     }
     private val mutex = Mutex()
     private val applied = mutableMapOf<String, Applied>()
@@ -178,6 +179,75 @@ class InMemoryFinanceRepository(
             CommandResult.Accepted(budget, WriteState.LOCAL_SAVED)
         } catch (error: IllegalArgumentException) { invalid(operationId, error) }
         catch (error: ArithmeticException) { invalid(operationId, error) }
+    }
+
+    suspend fun voidExpense(
+        operationId: String,
+        transactionId: String,
+        voidReason: String,
+        voidedAt: java.time.Instant = clock.instant(),
+    ): CommandResult<FinancialTransaction> = mutex.withLock {
+        val previous = applied[operationId]
+        if (previous != null) {
+            return@withLock if (previous is Applied.ExpenseVoided && previous.value.id == transactionId && previous.value.voidMetadata?.voidReason == voidReason.trim()) {
+                CommandResult.Accepted(previous.value, WriteState.LOCAL_SAVED, true)
+            } else {
+                conflict(operationId)
+            }
+        }
+
+        try {
+            checkId(operationId)
+            checkId(transactionId)
+            require(voidReason.isNotBlank() && voidReason.length <= 1000) { "Enter a valid void reason." }
+
+            val existingEvent = requireNotNull(state.value.events[transactionId]) { "Expense transaction not found" }
+            System.err.println("DEBUG_VOID: existingEvent.id='${existingEvent.id}' operationId='${existingEvent.operationId}'")
+            require(existingEvent.kind == TransactionKind.EXPENSE) { "Only expense transactions can be voided" }
+            if (existingEvent.status == TransactionStatus.VOIDED) {
+                require(existingEvent.voidMetadata?.voidReason == voidReason.trim()) { "This expense has already been voided" }
+                return@withLock CommandResult.Accepted(existingEvent, WriteState.LOCAL_SAVED, true)
+            }
+
+            val voidMetadata = VoidMetadata(voidedAt = voidedAt, voidReason = voidReason.trim())
+            val updatedEvent = FinancialTransaction(
+                operationId = existingEvent.operationId,
+                kind = existingEvent.kind,
+                status = TransactionStatus.VOIDED,
+                financialTime = existingEvent.financialTime,
+                clientCreatedAt = existingEvent.clientCreatedAt,
+                movements = existingEvent.movements,
+                components = existingEvent.components,
+                reservationEffects = existingEvent.reservationEffects,
+                valuations = existingEvent.valuations,
+                occurrenceId = existingEvent.occurrenceId,
+                expectedPaymentId = existingEvent.expectedPaymentId,
+                originalTransactionId = existingEvent.originalTransactionId,
+                goalPlanId = existingEvent.goalPlanId,
+                note = existingEvent.note,
+                merchantLabel = existingEvent.merchantLabel,
+                cryptoTrade = existingEvent.cryptoTrade,
+                replacesTransactionId = existingEvent.replacesTransactionId,
+                voidMetadata = voidMetadata,
+                createdAt = existingEvent.createdAt,
+                schemaVersion = existingEvent.schemaVersion,
+                revision = existingEvent.revision,
+            )
+
+            applied[operationId] = Applied.ExpenseVoided(updatedEvent)
+            state.value = state.value.copy(
+                events = state.value.events + (transactionId to updatedEvent),
+                revision = state.value.revision + 1,
+            )
+
+            CommandResult.Accepted(updatedEvent, WriteState.LOCAL_SAVED)
+        } catch (error: IllegalArgumentException) {
+            invalid(operationId, error)
+        } catch (error: IllegalStateException) {
+            invalid(operationId, error)
+        } catch (error: ArithmeticException) {
+            invalid(operationId, error)
+        }
     }
 
     override suspend fun activityPage(query: ActivityQuery): Observation<ActivityPage> {

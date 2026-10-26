@@ -281,6 +281,98 @@ class FirebaseFoundationRepository internal constructor(
         )
     }
 
+    suspend fun voidExpense(
+        operationId: String,
+        transactionId: String,
+        voidReason: String,
+        voidedAt: Instant = Instant.now(),
+    ): CommandResult<FinancialTransaction> = command(operationId) {
+        FoundationCodec.checkId(operationId)
+        FoundationCodec.checkId(transactionId)
+        require(voidReason.isNotBlank() && voidReason.length <= 1000) {
+            "Enter a valid void reason (up to 1000 characters)."
+        }
+
+        val reference = transactions.document(transactionId)
+
+        val result = firestore.runTransaction { transaction ->
+            requireSession()
+            val snapshot = transaction.get(reference)
+
+            if (!snapshot.exists()) {
+                throw FoundationProblem(
+                    FailureCode.NOT_FOUND,
+                    "Expense transaction not found.",
+                )
+            }
+
+            val existingData = requireNotNull(snapshot.data)
+            val existingEvent = FoundationCodec.event(
+                id = snapshot.id,
+                data = existingData,
+                pending = snapshot.metadata.hasPendingWrites(),
+            )
+
+            if (existingEvent.kind != TransactionKind.EXPENSE) {
+                throw FoundationProblem(
+                    FailureCode.VALIDATION,
+                    "Only expense transactions can be voided.",
+                )
+            }
+
+            if (existingEvent.status == TransactionStatus.VOIDED) {
+                if (existingEvent.voidMetadata?.voidReason == voidReason.trim()) {
+                    Applied(existingEvent, replayed = true)
+                } else {
+                    throw FoundationProblem(
+                        FailureCode.CONFLICT,
+                        "This expense has already been voided.",
+                    )
+                }
+            } else {
+                val voidMetadata = VoidMetadata(
+                    voidedAt = FoundationCodec.storedInstant(voidedAt),
+                    voidReason = voidReason.trim(),
+                )
+
+                val updatedEvent = FinancialTransaction(
+                    operationId = existingEvent.operationId,
+                    kind = existingEvent.kind,
+                    status = TransactionStatus.VOIDED,
+                    financialTime = existingEvent.financialTime,
+                    clientCreatedAt = existingEvent.clientCreatedAt,
+                    movements = existingEvent.movements,
+                    components = existingEvent.components,
+                    reservationEffects = existingEvent.reservationEffects,
+                    valuations = existingEvent.valuations,
+                    occurrenceId = existingEvent.occurrenceId,
+                    expectedPaymentId = existingEvent.expectedPaymentId,
+                    originalTransactionId = existingEvent.originalTransactionId,
+                    goalPlanId = existingEvent.goalPlanId,
+                    note = existingEvent.note,
+                    merchantLabel = existingEvent.merchantLabel,
+                    cryptoTrade = existingEvent.cryptoTrade,
+                    replacesTransactionId = existingEvent.replacesTransactionId,
+                    voidMetadata = voidMetadata,
+                    createdAt = existingEvent.createdAt,
+                    schemaVersion = existingEvent.schemaVersion,
+                    revision = existingEvent.revision,
+                )
+
+                val updatedData = FoundationCodec.eventData(updatedEvent)
+                transaction.set(reference, updatedData)
+
+                Applied(updatedEvent)
+            }
+        }.await()
+
+        CommandResult.Accepted(
+            value = result.value,
+            writeState = WriteState.CLOUD_CONFIRMED,
+            replayed = result.replayed,
+        )
+    }
+
     override fun observeAccounts(): Flow<Observation<List<Account>>> =
         observeQuery(
             query = { accounts.limit(5001) },
