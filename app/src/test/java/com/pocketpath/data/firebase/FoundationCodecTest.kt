@@ -17,6 +17,8 @@ import com.pocketpath.domain.calculation.accountBalance
 import com.pocketpath.domain.calculation.periodReportTotals
 import com.pocketpath.domain.model.AccountMovement
 import com.pocketpath.domain.model.ComponentNature
+import com.pocketpath.domain.model.ExpectedPayment
+import com.pocketpath.domain.model.ExpectedPaymentState
 import com.pocketpath.domain.model.FinancialTransaction
 import com.pocketpath.domain.model.IncomeSource
 import com.pocketpath.domain.model.IncomeSourceKind
@@ -30,6 +32,7 @@ import com.pocketpath.domain.repository.CompleteLedger
 import org.junit.Assert.*
 import org.junit.Test
 import java.time.Instant
+import java.time.LocalDate
 
 class FoundationCodecTest {
     private val audit = Timestamp(1_791_000_000L, 0)
@@ -165,6 +168,98 @@ class FoundationCodecTest {
         assertNull(FoundationCodec.incomeSource(source.id, pending, pending = true).metadata.createdAt)
         assertThrows(IllegalArgumentException::class.java) {
             FoundationCodec.incomeSource(source.id, pending)
+        }
+    }
+
+    @Test fun expectedPaymentRoundTripPreservesExactUnitsAndSourceRelationship() {
+        val payment = ExpectedPayment(
+            id = "milestone-operation",
+            incomeSourceId = "freelance-source",
+            projectLabel = "PocketPath contract",
+            amountDue = EntryAmount(Money.parse("1250.01", FiatCurrency.USD)),
+            dueDate = LocalDate.of(2026, 11, 15),
+            milestoneLabel = "Milestone 1",
+            clientLabel = "Client",
+            notes = "Awaiting receipt",
+        )
+        val stored = FoundationCodec.expectedPaymentData(payment) + mapOf(
+            "createdAt" to audit,
+            "updatedAt" to audit,
+        )
+
+        val decoded = FoundationCodec.expectedPayment(payment.id, stored)
+
+        assertEquals(payment.copy(metadata = payment.metadata.copy(
+            createdAt = audit.toDate().toInstant(),
+            updatedAt = audit.toDate().toInstant(),
+        )), decoded)
+        assertEquals("USD", stored["currencyCode"])
+        assertEquals(125_001L, stored["amountDueMinor"])
+        assertTrue(FoundationCodec.sameExpectedPayment(
+            stored,
+            stored + mapOf(
+                "createdAt" to Timestamp(audit.seconds + 60L, 0),
+                "updatedAt" to Timestamp(audit.seconds + 60L, 0),
+            ),
+        ))
+        assertFalse(FoundationCodec.sameExpectedPayment(stored, stored + ("incomeSourceId" to "other-source")))
+        assertFalse(FoundationCodec.sameExpectedPayment(stored, stored + ("amountDueMinor" to 125_002L)))
+    }
+
+    @Test fun expectedPaymentDecoderRejectsMalformedFieldsAndState() {
+        val payment = ExpectedPayment(
+            id = "expected-payment",
+            incomeSourceId = "income-source",
+            projectLabel = "Project",
+            amountDue = EntryAmount(Money.lkr(1L)),
+            dueDate = LocalDate.of(2026, 10, 25),
+        )
+        val stored = FoundationCodec.expectedPaymentData(payment) + mapOf(
+            "createdAt" to audit,
+            "updatedAt" to audit,
+        )
+
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(payment.id, stored + ("amountDueMinor" to 1.0))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(payment.id, stored + ("unexpected" to true))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(payment.id, stored + ("state" to ExpectedPaymentState.CANCELLED.name))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(payment.id, stored + ("incomeSourceId" to "source/other"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(payment.id, stored + ("amountDueMinor" to 0L))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPaymentData(payment.copy(
+                amountDue = EntryAmount(Money(FiatCurrency("JPY", 0), 1L)),
+            ))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(payment.id, stored + ("currencyCode" to "JPY"))
+        }
+    }
+
+    @Test fun pendingExpectedPaymentAllowsUnresolvedAuditTimes() {
+        val payment = ExpectedPayment(
+            id = "pending-payment",
+            incomeSourceId = "income-source",
+            projectLabel = "Project",
+            amountDue = EntryAmount(Money.lkr(1L)),
+            dueDate = LocalDate.of(2026, 10, 25),
+        )
+        val pending = FoundationCodec.expectedPaymentData(payment) + mapOf(
+            "createdAt" to null,
+            "updatedAt" to null,
+        )
+
+        assertNull(FoundationCodec.expectedPayment(payment.id, pending, pending = true).metadata.createdAt)
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(payment.id, pending)
         }
     }
 

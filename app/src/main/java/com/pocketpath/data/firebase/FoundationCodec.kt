@@ -41,6 +41,11 @@ internal object FoundationCodec {
         "name", "kind", "createdAt", "updatedAt", "revision",
     )
 
+    private val expectedPaymentRequired = setOf(
+        "incomeSourceId", "projectLabel", "currencyCode", "amountDueMinor", "dueDate",
+        "state", "createdAt", "updatedAt", "revision",
+    )
+
     fun incomeSourceData(source: IncomeSource): Map<String, Any> {
         checkId(source.id)
         require(source.metadata == RecordMetadata()) {
@@ -84,6 +89,70 @@ internal object FoundationCodec {
             kind = IncomeSourceKind.valueOf(data.text("kind")),
             defaultAccountId = data.optionalText("defaultAccountId")?.also(::checkId),
             defaultCurrency = currency,
+            metadata = RecordMetadata(
+                createdAt = if (pending && data["createdAt"] == null) null else data.instant("createdAt"),
+                updatedAt = if (pending && data["updatedAt"] == null) null else data.instant("updatedAt"),
+                revision = data.integer("revision"),
+                archivedAt = data.optionalInstant("archivedAt"),
+            ),
+        )
+    }
+
+    /**
+     * Canonical expected-payment mapping from the shared P01 contract.
+     *
+     * This is deliberately a codec boundary only. Firestore Rules do not yet authorize
+     * expected-payment creation, so callers must not treat encoding as persistence support.
+     */
+    fun expectedPaymentData(payment: ExpectedPayment): Map<String, Any> {
+        checkId(payment.id)
+        checkId(payment.incomeSourceId)
+        require(payment.metadata == RecordMetadata()) {
+            "New expected payments cannot supply server metadata"
+        }
+        require(payment.amountDue.money.currency in setOf(FiatCurrency.LKR, FiatCurrency.USD)) {
+            "Expected-payment persistence currently supports only LKR and USD"
+        }
+
+        return buildMap {
+            put("incomeSourceId", payment.incomeSourceId)
+            put("projectLabel", payment.projectLabel)
+            put("currencyCode", payment.amountDue.money.currency.code)
+            put("amountDueMinor", payment.amountDue.money.minor)
+            put("dueDate", payment.dueDate.toString())
+            put("state", payment.state.name)
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+            put("revision", 0L)
+            payment.milestoneLabel?.let { put("milestoneLabel", it) }
+            payment.clientLabel?.let { put("clientLabel", it) }
+            payment.cancelledAt?.let { put("cancelledAt", timestamp(it)) }
+            payment.notes?.let { put("notes", it) }
+        }
+    }
+
+    fun expectedPayment(
+        id: String,
+        data: FirestoreFields,
+        pending: Boolean = false,
+    ): ExpectedPayment {
+        checkId(id)
+        data.checkKeys(
+            expectedPaymentRequired,
+            setOf("milestoneLabel", "clientLabel", "cancelledAt", "notes", "archivedAt"),
+        )
+
+        return ExpectedPayment(
+            id = id,
+            incomeSourceId = data.text("incomeSourceId").also(::checkId),
+            projectLabel = data.text("projectLabel"),
+            amountDue = EntryAmount(Money(expectedPaymentCurrency(data.text("currencyCode")), data.integer("amountDueMinor"))),
+            dueDate = LocalDate.parse(data.text("dueDate")),
+            milestoneLabel = data.optionalText("milestoneLabel"),
+            clientLabel = data.optionalText("clientLabel"),
+            state = ExpectedPaymentState.valueOf(data.text("state")),
+            cancelledAt = data.optionalInstant("cancelledAt"),
+            notes = data.optionalText("notes"),
             metadata = RecordMetadata(
                 createdAt = if (pending && data["createdAt"] == null) null else data.instant("createdAt"),
                 updatedAt = if (pending && data["updatedAt"] == null) null else data.instant("updatedAt"),
@@ -424,6 +493,18 @@ internal object FoundationCodec {
     fun sameIncomeSource(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
             expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
+
+    fun sameExpectedPayment(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
+            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
+
+    private fun expectedPaymentCurrency(code: String): FiatCurrency {
+        val currency = FiatCurrency(code)
+        require(currency in setOf(FiatCurrency.LKR, FiatCurrency.USD)) {
+            "Expected-payment persistence currently supports only LKR and USD"
+        }
+        return currency
+    }
 
     private fun FirestoreFields.checkKeys(
         required: Set<String>,
