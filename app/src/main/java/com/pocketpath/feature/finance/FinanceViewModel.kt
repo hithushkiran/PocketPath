@@ -433,6 +433,31 @@ class FinanceViewModel @Inject constructor(
                 }
             }
 
+            is FinanceEvent.CategoryNameChanged ->
+                _state.update {
+                    it.copy(categoryForm = it.categoryForm.copy(name = event.value, error = null))
+                }
+
+            is FinanceEvent.CategoryClassChanged ->
+                _state.update {
+                    it.copy(categoryForm = it.categoryForm.copy(classification = event.value, error = null))
+                }
+
+            is FinanceEvent.CategoryIconChanged ->
+                _state.update {
+                    it.copy(categoryForm = it.categoryForm.copy(iconKey = event.value, error = null))
+                }
+
+            is FinanceEvent.ToggleCategoryDialog ->
+                _state.update {
+                    it.copy(
+                        showCategoryDialog = event.show,
+                        categoryForm = if (event.show) CategoryForm() else it.categoryForm,
+                    )
+                }
+
+            FinanceEvent.SaveCategory -> saveCustomCategory()
+
             FinanceEvent.ReloadActivity -> loadActivity(reset = true)
 
             FinanceEvent.LoadMoreActivity -> {
@@ -841,6 +866,108 @@ class FinanceViewModel @Inject constructor(
                         it.copy(
                             activityLoading = false,
                             activityError = "Unable to load Activity. Please retry.",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun saveCustomCategory() {
+        val current = _state.value
+        if (!current.ready || current.categoryForm.busy) return
+
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        val epoch = generation
+
+        val draft = current.categoryForm
+        val name = draft.name.trim()
+        if (name.isBlank() || name.length > 80) {
+            _state.update {
+                it.copy(
+                    categoryForm = it.categoryForm.copy(
+                        error = "Enter a valid category name (up to 80 characters).",
+                    ),
+                )
+            }
+            return
+        }
+
+        if (current.selectableCategories.any { it.name.equals(name, ignoreCase = true) }) {
+            _state.update {
+                it.copy(
+                    categoryForm = it.categoryForm.copy(
+                        error = "A category with this name already exists.",
+                    ),
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(
+                categoryForm = it.categoryForm.copy(
+                    busy = true,
+                    error = null,
+                ),
+            )
+        }
+
+        val newCategoryId = UUID.randomUUID().toString()
+        val category = Category(
+            id = newCategoryId,
+            name = name,
+            defaultCommitmentClass = draft.classification,
+            iconKey = draft.iconKey.trim().takeIf { it.isNotEmpty() },
+            sortOrder = (current.categories.maxOfOrNull { it.sortOrder } ?: 0) + 1,
+        )
+
+        val operationId = UUID.randomUUID().toString()
+
+        scope.launch {
+            try {
+                ensureActive()
+                if (epoch != generation) return@launch
+                val result = repo.saveCategory(operationId, category)
+                if (epoch != generation) return@launch
+
+                when (result) {
+                    is CommandResult.Accepted -> {
+                        _state.update { old ->
+                            val updatedExpenseForm = old.expenseForm.copy(
+                                categoryId = category.id,
+                                classification = category.defaultCommitmentClass,
+                            )
+                            old.copy(
+                                showCategoryDialog = false,
+                                categoryForm = CategoryForm(),
+                                expenseForm = updatedExpenseForm,
+                            )
+                        }
+                    }
+
+                    is CommandResult.Rejected -> {
+                        _state.update {
+                            it.copy(
+                                categoryForm = it.categoryForm.copy(
+                                    busy = false,
+                                    error = result.failure.message,
+                                ),
+                            )
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (epoch == generation) {
+                    _state.update {
+                        it.copy(
+                            categoryForm = it.categoryForm.copy(
+                                busy = false,
+                                error = "Unable to save category. Connect and retry.",
+                            ),
                         )
                     }
                 }

@@ -19,6 +19,14 @@ data class CashAccountForm(
     val error: String? = null,
 )
 
+data class CategoryForm(
+    val name: String = "",
+    val classification: CommitmentClass = CommitmentClass.DISCRETIONARY,
+    val iconKey: String = "",
+    val busy: Boolean = false,
+    val error: String? = null,
+)
+
 data class ExpenseForm(
     val accountId: String? = null,
     val categoryId: String? = null,
@@ -48,6 +56,8 @@ data class FinanceUiState(
     val poolBalanceMinor: Long? = null,
     val accountForm: CashAccountForm = CashAccountForm(),
     val expenseForm: ExpenseForm = ExpenseForm(),
+    val categoryForm: CategoryForm = CategoryForm(),
+    val showCategoryDialog: Boolean = false,
     val activity: List<FinancialTransaction> = emptyList(),
     val activityLoading: Boolean = false,
     val activityError: String? = null,
@@ -126,6 +136,12 @@ sealed interface FinanceEvent {
     data class ExpenseClassChanged(val value: CommitmentClass) : FinanceEvent
     data object SaveExpense : FinanceEvent
     data object NewExpense : FinanceEvent
+
+    data class CategoryNameChanged(val value: String) : FinanceEvent
+    data class CategoryClassChanged(val value: CommitmentClass) : FinanceEvent
+    data class CategoryIconChanged(val value: String) : FinanceEvent
+    data class ToggleCategoryDialog(val show: Boolean) : FinanceEvent
+    data object SaveCategory : FinanceEvent
 
     data object ReloadActivity : FinanceEvent
     data object LoadMoreActivity : FinanceEvent
