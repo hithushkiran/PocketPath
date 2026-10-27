@@ -14,11 +14,12 @@ import java.time.LocalDate
 /**
  * Read-only presentation state for a caller-selected planning-date window.
  *
- * This accepts repository observations but deliberately does not subscribe to the currently
- * unsupported expected-payment repository surface. A future session-scoped ViewModel supplies
- * observations after persistence has been approved.
+ * A session-scoped ViewModel supplies repository observations. This state remains read-only:
+ * expected-payment creation and cancellation are not part of this presentation surface.
  */
 data class ExpectedPaymentsUiState(
+    /** The signed-in owner of this presentation snapshot; never render another user's data. */
+    val userId: String? = null,
     val loading: Boolean = true,
     val payments: List<ExpectedPayment> = emptyList(),
     val totalsByCurrency: Map<FiatCurrency, Money> = emptyMap(),
@@ -27,6 +28,27 @@ data class ExpectedPaymentsUiState(
 ) {
     val isEmpty: Boolean get() = !loading && error == null && payments.isEmpty()
     val isPopulated: Boolean get() = !loading && payments.isNotEmpty()
+}
+
+/**
+ * Small session boundary kept outside the ViewModel so its cross-user behaviour is JVM-testable.
+ */
+internal object ExpectedPaymentsSessionState {
+    fun signedOut() = ExpectedPaymentsUiState(loading = false)
+
+    fun loading(userId: String) = ExpectedPaymentsUiState(userId = userId)
+
+    fun mapIfCurrent(
+        activeUserId: String?,
+        expectedUserId: String,
+        observation: Observation<List<ExpectedPayment>>,
+        start: LocalDate,
+        endInclusive: LocalDate,
+    ): ExpectedPaymentsUiState? {
+        if (activeUserId != expectedUserId) return null
+        return ExpectedPaymentsStateMapper.map(observation, start, endInclusive)
+            .copy(userId = expectedUserId)
+    }
 }
 
 /** Maps one repository snapshot into immutable, filtered presentation state. */
