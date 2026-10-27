@@ -10,6 +10,7 @@ import com.pocketpath.data.firebase.UserCollection
 import com.pocketpath.data.firebase.UserFirestorePaths
 import com.pocketpath.data.firebase.UserFirestoreScope
 import com.pocketpath.domain.model.IncomeSource
+import com.pocketpath.domain.model.ExpectedPayment
 import com.pocketpath.domain.model.FinancialTransaction
 import com.pocketpath.domain.model.TransactionKind
 import com.pocketpath.domain.model.TransactionStatus
@@ -50,6 +51,9 @@ class FirebaseIncomeRepository internal constructor(
 
     private val sources
         get() = owned.collection(UserCollection.INCOME_SOURCES)
+
+    private val expectedPayments
+        get() = owned.collection(UserCollection.EXPECTED_PAYMENTS)
 
     private val accounts
         get() = owned.collection(UserCollection.ACCOUNTS)
@@ -123,19 +127,58 @@ class FirebaseIncomeRepository internal constructor(
         }
     }
 
-    override fun observeExpectedPayments(): Flow<Observation<List<com.pocketpath.domain.model.ExpectedPayment>>> =
-        callbackFlow {
-            trySend(Observation.Failed(RepositoryFailure(
-                FailureCode.NOT_FOUND,
-                "Expected payments are not implemented in this increment.",
-            )))
+    override fun observeExpectedPayments(): Flow<Observation<List<ExpectedPayment>>> = callbackFlow {
+        trySend(Observation.Loading)
+        try {
+            requireSession()
+        } catch (error: Exception) {
+            trySend(Observation.Failed(error.failure()))
             close()
+            return@callbackFlow
         }
+
+        val registration = expectedPayments.limit(5001).addSnapshotListener(MetadataChanges.INCLUDE) { snapshot, error ->
+            if (error != null) {
+                trySend(Observation.Failed(error.failure()))
+                return@addSnapshotListener
+            }
+            if (snapshot == null) return@addSnapshotListener
+
+            try {
+                requireSession()
+                if (snapshot.size() > 5000) {
+                    trySend(Observation.Failed(RepositoryFailure(
+                        FailureCode.INCOMPLETE_HISTORY,
+                        "Too many expected payments to load safely.",
+                    )))
+                } else {
+                    trySend(Observation.Data(
+                        snapshot.documents.map { document ->
+                            FoundationCodec.expectedPayment(
+                                document.id,
+                                requireNotNull(document.data),
+                                document.metadata.hasPendingWrites(),
+                            )
+                        }.sortedBy(ExpectedPayment::id),
+                        snapshot.metadata(),
+                    ))
+                }
+            } catch (failure: Exception) {
+                trySend(Observation.Failed(failure.failure()))
+            }
+        }
+        val removeListener = { registration.remove() }
+        closeActions.add(removeListener)
+        awaitClose {
+            removeListener()
+            closeActions.remove(removeListener)
+        }
+    }
 
     override suspend fun saveExpectedPayment(
         operationId: String,
-        payment: com.pocketpath.domain.model.ExpectedPayment,
-    ): CommandResult<com.pocketpath.domain.model.ExpectedPayment> = CommandResult.Rejected(
+        payment: ExpectedPayment,
+    ): CommandResult<ExpectedPayment> = CommandResult.Rejected(
         RepositoryFailure(
             FailureCode.REJECTED,
             "Expected payments are not implemented in this increment.",
