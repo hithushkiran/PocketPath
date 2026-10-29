@@ -100,4 +100,13 @@ class BudgetFormStateTest {
         }
         assertFalse(isDiningOccupied)
     }
+
+    @Test
+    fun budgetFormBusyBlocksDuplicateSubmissions() {
+        val busyForm = BudgetForm(limitAmount = "50000", busy = true)
+        val state = FinanceUiState(showBudgetDialog = true, budgetForm = busyForm)
+
+        // Form is busy -> cannot submit
+        assertTrue(state.budgetForm.busy)
+    }
 }

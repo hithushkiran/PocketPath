@@ -51,6 +51,9 @@ class FinanceViewModel @Inject constructor(
             drafts?.expenseCommand = value
         }
 
+    private var pendingBudget: Budget? = null
+    private var pendingBudgetOperationId: String? = null
+
     private var activityJob: Job? = null
     private var activityRequest = 0
 
@@ -485,7 +488,9 @@ class FinanceViewModel @Inject constructor(
 
             FinanceEvent.SubmitVoidExpense -> submitVoidExpense()
 
-            is FinanceEvent.BudgetScopeChanged ->
+            is FinanceEvent.BudgetScopeChanged -> {
+                pendingBudget = null
+                pendingBudgetOperationId = null
                 _state.update {
                     val defaultCatId = if (event.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
                         it.budgetForm.categoryId ?: it.selectableCategories.firstOrNull()?.id
@@ -498,23 +503,37 @@ class FinanceViewModel @Inject constructor(
                         ),
                     )
                 }
+            }
 
-            is FinanceEvent.BudgetPeriodChanged ->
+            is FinanceEvent.BudgetPeriodChanged -> {
+                pendingBudget = null
+                pendingBudgetOperationId = null
                 _state.update {
                     it.copy(budgetForm = it.budgetForm.copy(periodType = event.period, error = null))
                 }
+            }
 
-            is FinanceEvent.BudgetCategoryChanged ->
+            is FinanceEvent.BudgetCategoryChanged -> {
+                pendingBudget = null
+                pendingBudgetOperationId = null
                 _state.update {
                     it.copy(budgetForm = it.budgetForm.copy(categoryId = event.categoryId, error = null))
                 }
+            }
 
-            is FinanceEvent.BudgetLimitChanged ->
+            is FinanceEvent.BudgetLimitChanged -> {
+                pendingBudget = null
+                pendingBudgetOperationId = null
                 _state.update {
                     it.copy(budgetForm = it.budgetForm.copy(limitAmount = event.amount, error = null))
                 }
+            }
 
-            is FinanceEvent.ToggleBudgetDialog ->
+            is FinanceEvent.ToggleBudgetDialog -> {
+                if (!event.show) {
+                    pendingBudget = null
+                    pendingBudgetOperationId = null
+                }
                 _state.update {
                     val defaultCatId = it.selectableCategories.firstOrNull()?.id
                     it.copy(
@@ -526,6 +545,7 @@ class FinanceViewModel @Inject constructor(
                         },
                     )
                 }
+            }
 
             FinanceEvent.SubmitBudget -> submitBudget()
 
@@ -1164,10 +1184,19 @@ class FinanceViewModel @Inject constructor(
 
         val categoryId = if (form.scope == BudgetScope.CATEGORY_DISCRETIONARY) form.categoryId else null
 
-        // Safeguard: Check if an active budget already exists for this exact slot
+        // Check if form parameters match current pending budget
+        val isPendingReuse = pendingBudget?.let { pending ->
+            pending.scope == form.scope &&
+                pending.periodType == form.periodType &&
+                pending.categoryId == categoryId &&
+                pending.limit == parsedMoney
+        } ?: false
+
+        // Safeguard: Check if an active budget already exists for this exact slot (ignoring our pending budget)
         val today = LocalDate.now(zone)
         val isSlotOccupied = current.budgets.any {
-            it.state == BudgetState.ACTIVE &&
+            it.id != pendingBudget?.id &&
+                it.state == BudgetState.ACTIVE &&
                 it.scope == form.scope &&
                 it.periodType == form.periodType &&
                 it.categoryId == categoryId &&
@@ -1186,23 +1215,29 @@ class FinanceViewModel @Inject constructor(
             return
         }
 
+        val (budget, operationId) = if (isPendingReuse && pendingBudget != null && pendingBudgetOperationId != null) {
+            pendingBudget!! to pendingBudgetOperationId!!
+        } else {
+            val newBudgetId = UUID.randomUUID().toString()
+            val newOpId = UUID.randomUUID().toString()
+            val newBudget = Budget(
+                id = newBudgetId,
+                scope = form.scope,
+                periodType = form.periodType,
+                limit = parsedMoney,
+                effectiveFrom = today,
+                categoryId = categoryId,
+                rolloverEnabled = false,
+                state = BudgetState.ACTIVE,
+            )
+            pendingBudget = newBudget
+            pendingBudgetOperationId = newOpId
+            newBudget to newOpId
+        }
+
         _state.update {
             it.copy(budgetForm = it.budgetForm.copy(busy = true, error = null))
         }
-
-        val newBudgetId = UUID.randomUUID().toString()
-        val budget = Budget(
-            id = newBudgetId,
-            scope = form.scope,
-            periodType = form.periodType,
-            limit = parsedMoney,
-            effectiveFrom = LocalDate.now(zone),
-            categoryId = categoryId,
-            rolloverEnabled = false,
-            state = BudgetState.ACTIVE,
-        )
-
-        val operationId = UUID.randomUUID().toString()
 
         scope.launch {
             try {
@@ -1213,6 +1248,8 @@ class FinanceViewModel @Inject constructor(
 
                 when (result) {
                     is CommandResult.Accepted -> {
+                        pendingBudget = null
+                        pendingBudgetOperationId = null
                         _state.update {
                             it.copy(
                                 showBudgetDialog = false,
@@ -1222,6 +1259,12 @@ class FinanceViewModel @Inject constructor(
                     }
 
                     is CommandResult.Rejected -> {
+                        val uncertain = result.failure.code == FailureCode.NETWORK
+                        if (!uncertain) {
+                            pendingBudget = null
+                            pendingBudgetOperationId = null
+                        }
+
                         _state.update {
                             it.copy(
                                 budgetForm = it.budgetForm.copy(
