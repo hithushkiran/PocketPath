@@ -7,11 +7,18 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.input.KeyboardType
 import com.pocketpath.domain.calculation.*
 import com.pocketpath.domain.model.*
 import com.pocketpath.domain.repository.CompleteLedger
 import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
+import com.pocketpath.ui.components.FinanceChoice
+import com.pocketpath.ui.components.FinanceMessage
 import com.pocketpath.ui.components.FinanceStatus
 import com.pocketpath.ui.components.lkrText
 import java.time.LocalDate
@@ -49,10 +56,22 @@ fun PlanScreen(
     ) {
         item {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    "Planning & Budgeting",
-                    style = MaterialTheme.typography.headlineSmall,
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "Planning & Budgeting",
+                        style = MaterialTheme.typography.headlineSmall,
+                    )
+                    OutlinedButton(
+                        onClick = { onEvent(FinanceEvent.ToggleBudgetDialog(true)) },
+                        enabled = state.ready,
+                    ) {
+                        Text("Set Budget")
+                    }
+                }
                 FinanceStatus(state, onEvent)
             }
         }
@@ -73,6 +92,13 @@ fun PlanScreen(
                                 "discretionary expenses and keep your spending under control.",
                             style = MaterialTheme.typography.bodyMedium,
                         )
+                        Button(
+                            onClick = { onEvent(FinanceEvent.ToggleBudgetDialog(true)) },
+                            enabled = state.ready,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("Set a budget")
+                        }
                     }
                 }
             }
@@ -107,7 +133,7 @@ fun PlanScreen(
 
         item {
             Text(
-                "Monthly Spending Breakdown",
+                "Monthly Spending Breakdown (Current Month)",
                 style = MaterialTheme.typography.titleLarge,
             )
         }
@@ -115,6 +141,129 @@ fun PlanScreen(
         item {
             SpendingBreakdownCard(breakdown)
         }
+    }
+
+    if (state.showBudgetDialog) {
+        val bForm = state.budgetForm
+        AlertDialog(
+            onDismissRequest = {
+                if (!bForm.busy) {
+                    onEvent(FinanceEvent.ToggleBudgetDialog(false))
+                }
+            },
+            title = { Text("Set Spending Budget") },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Budget Scope", style = MaterialTheme.typography.titleSmall)
+
+                    Column(modifier = Modifier.selectableGroup()) {
+                        BudgetScope.entries.forEach { scope ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .selectable(
+                                        selected = bForm.scope == scope,
+                                        enabled = !bForm.busy,
+                                        role = Role.RadioButton,
+                                        onClick = { onEvent(FinanceEvent.BudgetScopeChanged(scope)) },
+                                    ),
+                            ) {
+                                RadioButton(
+                                    selected = bForm.scope == scope,
+                                    onClick = null,
+                                    enabled = !bForm.busy,
+                                )
+                                Text(
+                                    text = when (scope) {
+                                        BudgetScope.OVERALL_DISCRETIONARY -> "Overall Discretionary"
+                                        BudgetScope.CATEGORY_DISCRETIONARY -> "Category Discretionary"
+                                    },
+                                    modifier = Modifier.align(Alignment.CenterVertically),
+                                )
+                            }
+                        }
+                    }
+
+                    if (bForm.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+                        FinanceChoice(
+                            label = "Category",
+                            selectedId = bForm.categoryId,
+                            options = state.selectableCategories.map { it.id to it.name },
+                            enabled = !bForm.busy,
+                            onSelected = { onEvent(FinanceEvent.BudgetCategoryChanged(it)) },
+                        )
+                    }
+
+                    Text("Budget Period", style = MaterialTheme.typography.titleSmall)
+
+                    Column(modifier = Modifier.selectableGroup()) {
+                        BudgetPeriod.entries.forEach { period ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .selectable(
+                                        selected = bForm.periodType == period,
+                                        enabled = !bForm.busy,
+                                        role = Role.RadioButton,
+                                        onClick = { onEvent(FinanceEvent.BudgetPeriodChanged(period)) },
+                                    ),
+                            ) {
+                                RadioButton(
+                                    selected = bForm.periodType == period,
+                                    onClick = null,
+                                    enabled = !bForm.busy,
+                                )
+                                Text(
+                                    text = when (period) {
+                                        BudgetPeriod.MONTHLY -> "Monthly"
+                                        BudgetPeriod.WEEKLY -> "Weekly"
+                                    },
+                                    modifier = Modifier.align(Alignment.CenterVertically),
+                                )
+                            }
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = bForm.limitAmount,
+                        onValueChange = { onEvent(FinanceEvent.BudgetLimitChanged(it)) },
+                        label = { Text("Spending limit (LKR)") },
+                        supportingText = { Text("Use at most two decimal places.") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        enabled = !bForm.busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    bForm.error?.let { FinanceMessage(it) }
+
+                    if (bForm.busy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.align(Alignment.CenterHorizontally),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { onEvent(FinanceEvent.SubmitBudget) },
+                    enabled = !bForm.busy && bForm.limitAmount.isNotBlank(),
+                ) {
+                    Text(if (bForm.busy) "Saving…" else "Save Budget")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { onEvent(FinanceEvent.ToggleBudgetDialog(false)) },
+                    enabled = !bForm.busy,
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 

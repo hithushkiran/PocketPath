@@ -485,6 +485,50 @@ class FinanceViewModel @Inject constructor(
 
             FinanceEvent.SubmitVoidExpense -> submitVoidExpense()
 
+            is FinanceEvent.BudgetScopeChanged ->
+                _state.update {
+                    val defaultCatId = if (event.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+                        it.budgetForm.categoryId ?: it.selectableCategories.firstOrNull()?.id
+                    } else null
+                    it.copy(
+                        budgetForm = it.budgetForm.copy(
+                            scope = event.scope,
+                            categoryId = defaultCatId,
+                            error = null,
+                        ),
+                    )
+                }
+
+            is FinanceEvent.BudgetPeriodChanged ->
+                _state.update {
+                    it.copy(budgetForm = it.budgetForm.copy(periodType = event.period, error = null))
+                }
+
+            is FinanceEvent.BudgetCategoryChanged ->
+                _state.update {
+                    it.copy(budgetForm = it.budgetForm.copy(categoryId = event.categoryId, error = null))
+                }
+
+            is FinanceEvent.BudgetLimitChanged ->
+                _state.update {
+                    it.copy(budgetForm = it.budgetForm.copy(limitAmount = event.amount, error = null))
+                }
+
+            is FinanceEvent.ToggleBudgetDialog ->
+                _state.update {
+                    val defaultCatId = it.selectableCategories.firstOrNull()?.id
+                    it.copy(
+                        showBudgetDialog = event.show,
+                        budgetForm = if (event.show) {
+                            BudgetForm(categoryId = defaultCatId)
+                        } else {
+                            it.budgetForm
+                        },
+                    )
+                }
+
+            FinanceEvent.SubmitBudget -> submitBudget()
+
             FinanceEvent.ReloadActivity -> loadActivity(reset = true)
 
             FinanceEvent.LoadMoreActivity -> {
@@ -1073,6 +1117,130 @@ class FinanceViewModel @Inject constructor(
                             voidForm = it.voidForm.copy(
                                 busy = false,
                                 error = "Unable to void expense. Connect and retry.",
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun submitBudget() {
+        val current = _state.value
+        if (!current.ready || current.budgetForm.busy) return
+
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        val epoch = generation
+
+        val form = current.budgetForm
+        val rawAmount = form.limitAmount.trim()
+
+        val parsedMoney = try {
+            val money = Money.parse(rawAmount, FiatCurrency.LKR)
+            require(money.minor > 0L) { "Spending limit must be greater than zero." }
+            EntryAmount(money)
+        } catch (_: Exception) {
+            _state.update {
+                it.copy(
+                    budgetForm = it.budgetForm.copy(
+                        error = "Enter a positive LKR amount with at most two decimal places.",
+                    ),
+                )
+            }
+            return
+        }
+
+        if (form.scope == BudgetScope.CATEGORY_DISCRETIONARY && form.categoryId.isNullOrBlank()) {
+            _state.update {
+                it.copy(
+                    budgetForm = it.budgetForm.copy(
+                        error = "Select a category for category spending limits.",
+                    ),
+                )
+            }
+            return
+        }
+
+        val categoryId = if (form.scope == BudgetScope.CATEGORY_DISCRETIONARY) form.categoryId else null
+
+        // Safeguard: Check if an active budget already exists for this exact slot
+        val today = LocalDate.now(zone)
+        val isSlotOccupied = current.budgets.any {
+            it.state == BudgetState.ACTIVE &&
+                it.scope == form.scope &&
+                it.periodType == form.periodType &&
+                it.categoryId == categoryId &&
+                !it.effectiveFrom.isAfter(today) &&
+                (it.effectiveTo == null || !it.effectiveTo.isBefore(today))
+        }
+
+        if (isSlotOccupied) {
+            _state.update {
+                it.copy(
+                    budgetForm = it.budgetForm.copy(
+                        error = "An active budget already exists for this scope and period.",
+                    ),
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(budgetForm = it.budgetForm.copy(busy = true, error = null))
+        }
+
+        val newBudgetId = UUID.randomUUID().toString()
+        val budget = Budget(
+            id = newBudgetId,
+            scope = form.scope,
+            periodType = form.periodType,
+            limit = parsedMoney,
+            effectiveFrom = LocalDate.now(zone),
+            categoryId = categoryId,
+            rolloverEnabled = false,
+            state = BudgetState.ACTIVE,
+        )
+
+        val operationId = UUID.randomUUID().toString()
+
+        scope.launch {
+            try {
+                ensureActive()
+                if (epoch != generation) return@launch
+                val result = repo.saveBudget(operationId, budget)
+                if (epoch != generation) return@launch
+
+                when (result) {
+                    is CommandResult.Accepted -> {
+                        _state.update {
+                            it.copy(
+                                showBudgetDialog = false,
+                                budgetForm = BudgetForm(),
+                            )
+                        }
+                    }
+
+                    is CommandResult.Rejected -> {
+                        _state.update {
+                            it.copy(
+                                budgetForm = it.budgetForm.copy(
+                                    busy = false,
+                                    error = result.failure.message,
+                                ),
+                            )
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (epoch == generation) {
+                    _state.update {
+                        it.copy(
+                            budgetForm = it.budgetForm.copy(
+                                busy = false,
+                                error = "Unable to save budget. Connect and retry.",
                             ),
                         )
                     }

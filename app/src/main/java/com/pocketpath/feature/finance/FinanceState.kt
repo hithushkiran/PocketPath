@@ -3,6 +3,8 @@ package com.pocketpath.feature.finance
 import com.pocketpath.domain.calculation.AccountBalance
 import com.pocketpath.domain.model.Account
 import com.pocketpath.domain.model.Budget
+import com.pocketpath.domain.model.BudgetPeriod
+import com.pocketpath.domain.model.BudgetScope
 import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
@@ -54,6 +56,15 @@ data class VoidExpenseForm(
     val error: String? = null,
 )
 
+data class BudgetForm(
+    val scope: BudgetScope = BudgetScope.OVERALL_DISCRETIONARY,
+    val periodType: BudgetPeriod = BudgetPeriod.MONTHLY,
+    val categoryId: String? = null,
+    val limitAmount: String = "",
+    val busy: Boolean = false,
+    val error: String? = null,
+)
+
 data class FinanceUiState(
     val userId: String? = null,
     val loading: Boolean = true,
@@ -69,6 +80,8 @@ data class FinanceUiState(
     val showCategoryDialog: Boolean = false,
     val voidForm: VoidExpenseForm = VoidExpenseForm(),
     val showVoidDialog: Boolean = false,
+    val budgetForm: BudgetForm = BudgetForm(),
+    val showBudgetDialog: Boolean = false,
     val activity: List<FinancialTransaction> = emptyList(),
     val activityLoading: Boolean = false,
     val activityError: String? = null,
@@ -158,6 +171,13 @@ sealed interface FinanceEvent {
     data class VoidReasonChanged(val value: String) : FinanceEvent
     data class ToggleVoidDialog(val show: Boolean) : FinanceEvent
     data object SubmitVoidExpense : FinanceEvent
+
+    data class BudgetScopeChanged(val scope: BudgetScope) : FinanceEvent
+    data class BudgetPeriodChanged(val period: BudgetPeriod) : FinanceEvent
+    data class BudgetCategoryChanged(val categoryId: String) : FinanceEvent
+    data class BudgetLimitChanged(val amount: String) : FinanceEvent
+    data class ToggleBudgetDialog(val show: Boolean) : FinanceEvent
+    data object SubmitBudget : FinanceEvent
 
     data object ReloadActivity : FinanceEvent
     data object LoadMoreActivity : FinanceEvent
