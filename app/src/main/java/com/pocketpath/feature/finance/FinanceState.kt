@@ -2,6 +2,7 @@ package com.pocketpath.feature.finance
 
 import com.pocketpath.domain.calculation.AccountBalance
 import com.pocketpath.domain.model.Account
+import com.pocketpath.domain.model.Budget
 import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
@@ -59,6 +60,7 @@ data class FinanceUiState(
     val error: String? = null,
     val accounts: List<Account> = emptyList(),
     val categories: List<Category> = emptyList(),
+    val budgets: List<Budget> = emptyList(),
     val balances: Map<String, AccountBalance> = emptyMap(),
     val poolBalanceMinor: Long? = null,
     val accountForm: CashAccountForm = CashAccountForm(),

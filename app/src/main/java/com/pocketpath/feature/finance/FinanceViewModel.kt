@@ -157,18 +157,21 @@ class FinanceViewModel @Inject constructor(
                             combine(
                                 current.observeAccounts(),
                                 current.observeEffectiveLedger(),
-                                current.observeCategories(),
-                            ) { accounts, ledger, categories ->
-                                Triple(accounts, ledger, categories)
-                            }.collect { (accounts, ledger, categories) ->
+                                combine(current.observeCategories(), current.observeBudgets(), ::Pair),
+                            ) { accounts, ledger, (categories, budgets) ->
+                                Triple(accounts, ledger, categories to budgets)
+                            }.collect { (accounts, ledger, catAndBud) ->
                                 if (epoch != generation) return@collect
+                                val (categories, budgets) = catAndBud
 
                                 val accountData = accounts as? Observation.Data
                                 val categoryData = categories as? Observation.Data
+                                val budgetData = budgets as? Observation.Data
 
                                 _state.update { old ->
                                     val availableAccounts = accountData?.value ?: old.accounts
                                     val availableCategories = categoryData?.value ?: old.categories
+                                    val availableBudgets = budgetData?.value ?: old.budgets
                                     val selectableAccounts = availableAccounts.filter {
                                         it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null
                                     }
@@ -202,6 +205,7 @@ class FinanceViewModel @Inject constructor(
                                     old.copy(
                                         accounts = availableAccounts,
                                         categories = availableCategories,
+                                        budgets = availableBudgets,
                                         referencesReady = accountData != null && categoryData != null,
                                         expenseForm = form,
                                     )
