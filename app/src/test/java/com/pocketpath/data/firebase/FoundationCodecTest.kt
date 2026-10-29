@@ -263,6 +263,41 @@ class FoundationCodecTest {
         }
     }
 
+    @Test fun expectedPaymentCancellationDecodesLegacyAndOperationIdentifiedDocuments() {
+        val payment = ExpectedPayment(
+            id = "expected-payment",
+            incomeSourceId = "income-source",
+            projectLabel = "Milestone",
+            amountDue = EntryAmount(Money(FiatCurrency.LKR, 1_234L)),
+            dueDate = LocalDate.of(2026, 10, 25),
+        )
+        val active = FoundationCodec.expectedPaymentData(payment) + mapOf(
+            "createdAt" to audit,
+            "updatedAt" to audit,
+        )
+        val legacyCancelled = active + mapOf(
+            "state" to ExpectedPaymentState.CANCELLED.name,
+            "cancelledAt" to audit,
+            "updatedAt" to audit,
+            "revision" to 1L,
+        )
+
+        assertNull(FoundationCodec.expectedPayment(payment.id, legacyCancelled).cancellationOperationId)
+        assertEquals(
+            "cancel-operation",
+            FoundationCodec.expectedPayment(
+                payment.id,
+                legacyCancelled + ("cancellationOperationId" to "cancel-operation"),
+            ).cancellationOperationId,
+        )
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(
+                payment.id,
+                legacyCancelled + ("cancellationOperationId" to "not/a-document-id"),
+            )
+        }
+    }
+
     @Test fun replayIgnoresAuditTimesAfterTimestampNormalizationButRejectsChangedAmounts() {
         val firstTime = Instant.parse("2026-10-01T06:00:00.123456001Z")
         val retryTime = Instant.parse("2026-10-01T06:00:00.123456999Z")

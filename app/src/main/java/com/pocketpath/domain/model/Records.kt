@@ -82,12 +82,18 @@ data class ExpectedPayment(
     val milestoneLabel: String? = null, val clientLabel: String? = null,
     val state: ExpectedPaymentState = ExpectedPaymentState.ACTIVE,
     val cancelledAt: Instant? = null, val notes: String? = null,
+    val cancellationOperationId: String? = null,
+    val receivedAmountMinor: Long = 0L,
+    val lastReceiptOperationId: String? = null,
     val metadata: RecordMetadata = RecordMetadata(),
 ) {
     init {
         require(id.isNotBlank() && incomeSourceId.isNotBlank() && projectLabel.isNotBlank())
         require(notes == null || notes.length <= 1000)
         require((state == ExpectedPaymentState.CANCELLED) == (cancelledAt != null))
+        require(receivedAmountMinor in 0..amountDue.money.minor)
+        cancellationOperationId?.let { require(it.isNotBlank() && '/' !in it) }
+        lastReceiptOperationId?.let { require(it.isNotBlank() && '/' !in it) }
     }
 }
 

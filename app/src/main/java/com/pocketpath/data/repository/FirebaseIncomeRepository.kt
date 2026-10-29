@@ -10,6 +10,8 @@ import com.pocketpath.data.firebase.UserCollection
 import com.pocketpath.data.firebase.UserFirestorePaths
 import com.pocketpath.data.firebase.UserFirestoreScope
 import com.pocketpath.domain.model.IncomeSource
+import com.pocketpath.domain.calculation.ExpectedPaymentCancellationDecision
+import com.pocketpath.domain.calculation.expectedPaymentCancellationDecision
 import com.pocketpath.domain.model.ExpectedPayment
 import com.pocketpath.domain.model.FinancialTransaction
 import com.pocketpath.domain.model.TransactionKind
@@ -178,13 +180,95 @@ class FirebaseIncomeRepository internal constructor(
     override suspend fun saveExpectedPayment(
         operationId: String,
         payment: ExpectedPayment,
-    ): CommandResult<ExpectedPayment> = CommandResult.Rejected(
-        RepositoryFailure(
-            FailureCode.REJECTED,
-            "Expected payments are not implemented in this increment.",
-            operationId,
-        ),
-    )
+    ): CommandResult<ExpectedPayment> = try {
+        requireSession()
+        FoundationCodec.checkId(operationId)
+        require(payment.id == operationId) {
+            "An expected payment ID must equal its retained operation ID."
+        }
+        require(payment.state == com.pocketpath.domain.model.ExpectedPaymentState.ACTIVE) {
+            "New expected payments must be active."
+        }
+        require(payment.cancelledAt == null) { "New expected payments cannot be cancelled." }
+        require(payment.amountDue.money.currency == FiatCurrency.LKR) {
+            "Expected-payment creation is LKR-only until foreign-income support is implemented."
+        }
+        require(payment.amountDue.money.minor > 0) { "Expected payment amount must be positive." }
+        val expected = FoundationCodec.expectedPaymentData(payment)
+        val reference = expectedPayments.document(operationId)
+
+        val result = firestore.runTransaction { transaction ->
+            requireSession()
+            val existing = transaction.get(reference)
+            if (existing.exists()) {
+                val stored = requireNotNull(existing.data)
+                if (!FoundationCodec.sameExpectedPayment(stored, expected)) {
+                    throw IncomeSourceProblem(FailureCode.CONFLICT, "This operation ID was already used differently.", operationId)
+                }
+                FirebaseExpectedPaymentApplied(FoundationCodec.expectedPayment(operationId, stored), true)
+            } else {
+                val source = transaction.get(sources.document(payment.incomeSourceId))
+                if (!source.exists()) {
+                    throw IncomeSourceProblem(FailureCode.NOT_FOUND, "Income source was not found.", operationId)
+                }
+                val decodedSource = FoundationCodec.incomeSource(source.id, requireNotNull(source.data))
+                if (decodedSource.metadata.archivedAt != null ||
+                    (decodedSource.defaultCurrency != null && decodedSource.defaultCurrency != FiatCurrency.LKR)
+                ) {
+                    throw IncomeSourceProblem(FailureCode.REJECTED, "Income source is not eligible for LKR expected income.", operationId)
+                }
+                transaction.set(reference, expected)
+                FirebaseExpectedPaymentApplied(payment, false)
+            }
+        }.await()
+        CommandResult.Accepted(result.payment, WriteState.CLOUD_CONFIRMED, result.replayed)
+    } catch (error: Exception) {
+        CommandResult.Rejected(error.failure(operationId))
+    }
+
+    override suspend fun cancelExpectedPayment(operationId: String, paymentId: String, expectedRevision: Long): CommandResult<ExpectedPayment> = try {
+        requireSession(); FoundationCodec.checkId(operationId); FoundationCodec.checkId(paymentId); require(expectedRevision >= 0)
+        val reference = expectedPayments.document(paymentId)
+        val result = firestore.runTransaction { transaction ->
+            requireSession()
+            val snapshot = transaction.get(reference)
+            if (!snapshot.exists()) throw IncomeSourceProblem(FailureCode.NOT_FOUND, "Expected payment was not found.", operationId)
+            val stored = requireNotNull(snapshot.data)
+            val payment = FoundationCodec.expectedPayment(paymentId, stored)
+            when (expectedPaymentCancellationDecision(payment, operationId, expectedRevision)) {
+                ExpectedPaymentCancellationDecision.Replay -> FirebaseExpectedPaymentApplied(payment, true)
+                ExpectedPaymentCancellationDecision.StaleRevision -> throw IncomeSourceProblem(
+                    FailureCode.CONFLICT,
+                    "Expected payment changed. Refresh and try again.",
+                    operationId,
+                )
+                ExpectedPaymentCancellationDecision.ConflictingOperation -> throw IncomeSourceProblem(
+                    FailureCode.CONFLICT,
+                    "Expected payment was already cancelled by another operation.",
+                    operationId,
+                )
+                ExpectedPaymentCancellationDecision.InvalidState -> throw IncomeSourceProblem(
+                    FailureCode.REJECTED,
+                    "Expected payment cannot be cancelled in its current state.",
+                    operationId,
+                )
+                ExpectedPaymentCancellationDecision.Apply -> {
+                    val cancelled = stored + mapOf(
+                    "state" to "CANCELLED", "cancelledAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                    "updatedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                    "revision" to payment.metadata.revision + 1, "cancellationOperationId" to operationId,
+                    )
+                    transaction.set(reference, cancelled)
+                    FirebaseExpectedPaymentApplied(payment.copy(
+                        state = com.pocketpath.domain.model.ExpectedPaymentState.CANCELLED,
+                        cancelledAt = Instant.now(), cancellationOperationId = operationId,
+                        metadata = payment.metadata.copy(revision = payment.metadata.revision + 1),
+                    ), false)
+                }
+            }
+        }.await()
+        CommandResult.Accepted(result.payment, WriteState.CLOUD_CONFIRMED, result.replayed)
+    } catch (error: Exception) { CommandResult.Rejected(error.failure(operationId)) }
 
     override suspend fun saveSource(
         operationId: String,
@@ -256,6 +340,73 @@ class FirebaseIncomeRepository internal constructor(
         CommandResult.Rejected(error.failure(event.id))
     }
 
+    override suspend fun recordExpectedPaymentReceipt(
+        event: FinancialTransaction,
+        expectedRevision: Long,
+    ): CommandResult<FinancialTransaction> = try {
+        requireSession()
+        require(expectedRevision >= 0)
+        requireExpectedPaymentReceipt(event)
+        val paymentId = requireNotNull(event.expectedPaymentId)
+        val expectedEvent = FoundationCodec.eventData(event)
+        val eventReference = transactions.document(event.id)
+        val paymentReference = expectedPayments.document(paymentId)
+        val result = firestore.runTransaction { transaction ->
+            requireSession()
+            // Read the immutable operation first: replays do not depend on current payment state.
+            val existing = transaction.get(eventReference)
+            if (existing.exists()) {
+                val stored = requireNotNull(existing.data)
+                if (!FoundationCodec.sameEvent(stored, expectedEvent)) {
+                    throw IncomeSourceProblem(FailureCode.CONFLICT, "This operation ID was already used differently.", event.id)
+                }
+                FirebaseIncomeApplied(FoundationCodec.event(event.id, stored), true)
+            } else {
+                val paymentSnapshot = transaction.get(paymentReference)
+                if (!paymentSnapshot.exists()) throw IncomeSourceProblem(FailureCode.NOT_FOUND, "Expected payment was not found.", event.id)
+                val paymentData = requireNotNull(paymentSnapshot.data)
+                val payment = FoundationCodec.expectedPayment(paymentId, paymentData)
+                if (payment.state != com.pocketpath.domain.model.ExpectedPaymentState.ACTIVE ||
+                    payment.metadata.revision != expectedRevision
+                ) throw IncomeSourceProblem(FailureCode.CONFLICT, "Expected payment changed. Refresh and try again.", event.id)
+
+                val receiptAmount = (event.movements.single().amount as com.pocketpath.domain.money.NativeAmount.Fiat).money
+                if (payment.incomeSourceId != event.components.single().incomeSourceId ||
+                    payment.amountDue.money.currency != receiptAmount.currency
+                ) throw IncomeSourceProblem(FailureCode.REJECTED, "Receipt does not match the expected payment.", event.id)
+                val received = Math.addExact(payment.receivedAmountMinor, receiptAmount.minor)
+                if (received > payment.amountDue.money.minor) {
+                    throw IncomeSourceProblem(FailureCode.REJECTED, "Receipt exceeds the outstanding expected amount.", event.id)
+                }
+
+                val account = transaction.get(accounts.document(event.movements.single().accountId))
+                if (!account.exists()) throw IncomeSourceProblem(FailureCode.NOT_FOUND, "Receiving account was not found.", event.id)
+                val decodedAccount = FoundationCodec.account(account.id, requireNotNull(account.data))
+                if (decodedAccount.asset != FiatCurrency.LKR || decodedAccount.metadata.archivedAt != null) {
+                    throw IncomeSourceProblem(FailureCode.REJECTED, "Receiving account is not active LKR.", event.id)
+                }
+                val source = transaction.get(sources.document(payment.incomeSourceId))
+                if (!source.exists()) throw IncomeSourceProblem(FailureCode.NOT_FOUND, "Income source was not found.", event.id)
+                val decodedSource = FoundationCodec.incomeSource(source.id, requireNotNull(source.data))
+                if (decodedSource.metadata.archivedAt != null ||
+                    (decodedSource.defaultCurrency != null && decodedSource.defaultCurrency != FiatCurrency.LKR)
+                ) throw IncomeSourceProblem(FailureCode.REJECTED, "Income source is not eligible for LKR income.", event.id)
+
+                transaction.set(eventReference, expectedEvent)
+                transaction.update(paymentReference, mapOf(
+                    "receivedAmountMinor" to received,
+                    "lastReceiptOperationId" to event.id,
+                    "updatedAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                    "revision" to payment.metadata.revision + 1,
+                ))
+                FirebaseIncomeApplied(event, false)
+            }
+        }.await()
+        CommandResult.Accepted(result.event, WriteState.CLOUD_CONFIRMED, result.replayed)
+    } catch (error: Exception) {
+        CommandResult.Rejected(error.failure(event.id))
+    }
+
     private fun requireManualLkrIncome(event: FinancialTransaction) {
         require(event.kind == TransactionKind.INCOME && event.status == TransactionStatus.POSTED)
         require(event.movements.size == 1 && event.components.size == 1)
@@ -268,6 +419,21 @@ class FirebaseIncomeRepository internal constructor(
         val component = event.components.single()
         require(component.incomeSourceId != null && component.categoryId == null && component.commitmentClass == null)
     }
+
+    private fun requireExpectedPaymentReceipt(event: FinancialTransaction) {
+        requireManualLkrIncome(event.copyExpectedPaymentForValidation())
+        requireNotNull(event.expectedPaymentId).also(FoundationCodec::checkId)
+    }
+
+    private fun FinancialTransaction.copyExpectedPaymentForValidation(): FinancialTransaction = FinancialTransaction(
+        operationId = operationId, kind = kind, status = status, financialTime = financialTime,
+        clientCreatedAt = clientCreatedAt, movements = movements, components = components,
+        reservationEffects = reservationEffects, valuations = valuations, occurrenceId = occurrenceId,
+        expectedPaymentId = null, originalTransactionId = originalTransactionId, goalPlanId = goalPlanId,
+        note = note, merchantLabel = merchantLabel, cryptoTrade = cryptoTrade,
+        replacesTransactionId = replacesTransactionId, voidMetadata = voidMetadata, createdAt = createdAt,
+        schemaVersion = schemaVersion, revision = revision,
+    )
 
     private fun QuerySnapshot.metadata(): ObservationMetadata = ObservationMetadata(
         origin = if (metadata.isFromCache) DataOrigin.CACHE else DataOrigin.SERVER,
@@ -302,6 +468,7 @@ class FirebaseIncomeRepository internal constructor(
     }
 
     private data class FirebaseSourceApplied(val source: IncomeSource, val replayed: Boolean)
+    private data class FirebaseExpectedPaymentApplied(val payment: ExpectedPayment, val replayed: Boolean)
     private data class FirebaseIncomeApplied(val event: FinancialTransaction, val replayed: Boolean)
     private class IncomeSourceProblem(
         val code: FailureCode,

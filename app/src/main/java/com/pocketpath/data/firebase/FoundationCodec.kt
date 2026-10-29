@@ -113,6 +113,9 @@ internal object FoundationCodec {
         require(payment.amountDue.money.currency in setOf(FiatCurrency.LKR, FiatCurrency.USD)) {
             "Expected-payment persistence currently supports only LKR and USD"
         }
+        require(payment.receivedAmountMinor == 0L && payment.lastReceiptOperationId == null) {
+            "New expected payments cannot contain receipt allocation state"
+        }
 
         return buildMap {
             put("incomeSourceId", payment.incomeSourceId)
@@ -124,6 +127,7 @@ internal object FoundationCodec {
             put("createdAt", FieldValue.serverTimestamp())
             put("updatedAt", FieldValue.serverTimestamp())
             put("revision", 0L)
+            put("receivedAmountMinor", 0L)
             payment.milestoneLabel?.let { put("milestoneLabel", it) }
             payment.clientLabel?.let { put("clientLabel", it) }
             payment.cancelledAt?.let { put("cancelledAt", timestamp(it)) }
@@ -139,7 +143,7 @@ internal object FoundationCodec {
         checkId(id)
         data.checkKeys(
             expectedPaymentRequired,
-            setOf("milestoneLabel", "clientLabel", "cancelledAt", "notes", "archivedAt"),
+            setOf("milestoneLabel", "clientLabel", "cancelledAt", "notes", "archivedAt", "cancellationOperationId", "receivedAmountMinor", "lastReceiptOperationId"),
         )
 
         return ExpectedPayment(
@@ -153,6 +157,9 @@ internal object FoundationCodec {
             state = ExpectedPaymentState.valueOf(data.text("state")),
             cancelledAt = data.optionalInstant("cancelledAt"),
             notes = data.optionalText("notes"),
+            cancellationOperationId = data.optionalText("cancellationOperationId")?.also(::checkId),
+            receivedAmountMinor = (data["receivedAmountMinor"] as? Number)?.toLong() ?: 0L,
+            lastReceiptOperationId = data.optionalText("lastReceiptOperationId")?.also(::checkId),
             metadata = RecordMetadata(
                 createdAt = if (pending && data["createdAt"] == null) null else data.instant("createdAt"),
                 updatedAt = if (pending && data["updatedAt"] == null) null else data.instant("updatedAt"),
@@ -329,7 +336,7 @@ internal object FoundationCodec {
         require(event.status == TransactionStatus.POSTED && event.revision == 0L)
         require(event.movements.size == 1)
         require(event.reservationEffects.isEmpty() && event.valuations.isEmpty())
-        require(event.occurrenceId == null && event.expectedPaymentId == null)
+        require(event.occurrenceId == null)
         require(event.originalTransactionId == null && event.goalPlanId == null)
         require(event.replacesTransactionId == null && event.cryptoTrade == null)
         require(event.merchantLabel == null || event.merchantLabel.length <= 1000)
@@ -394,6 +401,7 @@ internal object FoundationCodec {
             put("components", componentData)
             put("reservationEffects", emptyList<Any>())
             put("valuations", emptyList<Any>())
+            event.expectedPaymentId?.let { put("expectedPaymentId", it) }
             event.note?.let { put("note", it) }
             event.merchantLabel?.let { put("merchantLabel", it) }
         }
@@ -405,7 +413,7 @@ internal object FoundationCodec {
         pending: Boolean = false,
     ): FinancialTransaction {
         checkId(id)
-        data.checkKeys(eventRequired, setOf("note", "merchantLabel"))
+        data.checkKeys(eventRequired, setOf("note", "merchantLabel", "expectedPaymentId"))
         require(data.text("operationId") == id)
         require(data.integer("schemaVersion") == 1L)
         require(data.integer("revision") == 0L)
@@ -456,6 +464,7 @@ internal object FoundationCodec {
             clientCreatedAt = data.instant("clientCreatedAt"),
             movements = movements,
             components = components,
+            expectedPaymentId = data.optionalText("expectedPaymentId")?.also(::checkId),
             note = data.optionalText("note"),
             merchantLabel = data.optionalText("merchantLabel"),
             createdAt = if (pending && data["createdAt"] == null) {

@@ -170,6 +170,37 @@ service cloud.firestore {
         && data.revision == 0;
     }
 
+    function validExpectedPayment(uid, data) {
+      let source = incomeSourcePath(uid, data.incomeSourceId);
+      return fields(
+          data,
+          [
+            'incomeSourceId', 'projectLabel', 'currencyCode', 'amountDueMinor', 'dueDate',
+            'state', 'createdAt', 'updatedAt', 'revision'
+          ],
+          ['milestoneLabel', 'clientLabel', 'notes']
+        )
+        && validId(data.incomeSourceId)
+        && nonBlank(data.projectLabel)
+        && data.currencyCode == 'LKR'
+        && data.amountDueMinor is int
+        && data.amountDueMinor > 0
+        && data.amountDueMinor <= 100000000000
+        && validDate(data.dueDate)
+        && data.state == 'ACTIVE'
+        && (!('milestoneLabel' in data) || nonBlank(data.milestoneLabel))
+        && (!('clientLabel' in data) || nonBlank(data.clientLabel))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000))
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.revision is int
+        && data.revision == 0
+        && exists(source)
+        && get(source).data.get('archivedAt', null) == null
+        && (!('defaultCurrencyCode' in get(source).data)
+          || get(source).data.defaultCurrencyCode == 'LKR');
+    }
+
     function validMovement(movement) {
       return fields(
           movement,
@@ -194,7 +225,7 @@ service cloud.firestore {
             'accountIds', 'categoryIds', 'goalIds', 'incomeSourceIds',
             'movements', 'components', 'reservationEffects', 'valuations'
           ],
-          ['note', 'merchantLabel']
+          ['note', 'merchantLabel', 'expectedPaymentId']
         )
         && validId(id)
         && data.operationId == id
@@ -323,6 +354,38 @@ service cloud.firestore {
         && (!('defaultCurrencyCode' in get(source).data) || get(source).data.defaultCurrencyCode == 'LKR');
     }
 
+    function validIncomeExpectedLink(uid, transactionId, data) {
+      let payment = /databases/$(database)/documents/users/$(uid)/expectedPayments/$(data.expectedPaymentId);
+      let afterPayment = getAfter(payment).data;
+      return !('expectedPaymentId' in data)
+        || (
+          validId(data.expectedPaymentId)
+          && afterPayment.lastReceiptOperationId == transactionId
+          && afterPayment.receivedAmountMinor > get(payment).data.receivedAmountMinor
+          && afterPayment.incomeSourceId == data.components[0].incomeSourceId
+        );
+    }
+
+    function validExpectedReceiptUpdate(uid, paymentId) {
+      let receiptId = request.resource.data.lastReceiptOperationId;
+      let receipt = getAfter(eventPath(uid, receiptId)).data;
+      return resource.data.state == 'ACTIVE'
+        && request.resource.data.state == 'ACTIVE'
+        && request.resource.data.revision == resource.data.revision + 1
+        && request.resource.data.updatedAt == request.time
+        && validId(receiptId)
+        && receipt.operationId == receiptId
+        && receipt.kind == 'INCOME'
+        && receipt.expectedPaymentId == paymentId
+        && receipt.incomeSourceIds == [resource.data.incomeSourceId]
+        && receipt.movements.size() == 1
+        && request.resource.data.receivedAmountMinor == resource.data.receivedAmountMinor + receipt.movements[0].amountMinor
+        && request.resource.data.receivedAmountMinor <= resource.data.amountDueMinor
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'receivedAmountMinor', 'lastReceiptOperationId', 'updatedAt', 'revision'
+        ]);
+    }
+
     match /users/{uid} {
       allow get: if isOwner(uid);
       allow list: if false;
@@ -342,11 +405,37 @@ service cloud.firestore {
       }
 
       match /incomeSources/{sourceId} {
+        allow get, list: if isOwner(uid);
+
         allow create: if isOwner(uid)
           && validId(sourceId)
           && validIncomeSource(request.resource.data);
 
         allow update, delete: if false;
+      }
+
+      match /expectedPayments/{paymentId} {
+        allow get, list: if isOwner(uid);
+
+        allow create: if isOwner(uid)
+          && validId(paymentId)
+          && validExpectedPayment(uid, request.resource.data);
+
+        allow update: if isOwner(uid) && (
+          validExpectedReceiptUpdate(uid, paymentId)
+          || (
+            resource.data.state == 'ACTIVE'
+            && request.resource.data.state == 'CANCELLED'
+            && request.resource.data.revision == resource.data.revision + 1
+            && request.resource.data.cancelledAt == request.time
+            && request.resource.data.updatedAt == request.time
+            && validId(request.resource.data.cancellationOperationId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'state', 'cancelledAt', 'updatedAt', 'revision', 'cancellationOperationId'
+            ])
+          )
+        );
+        allow delete: if false;
       }
 
       match /accounts/{accountId} {
@@ -371,6 +460,7 @@ service cloud.firestore {
             || (
               request.resource.data.kind == 'INCOME'
               && validIncome(uid, request.resource.data)
+              && validIncomeExpectedLink(uid, transactionId, request.resource.data)
             )
           );
 
