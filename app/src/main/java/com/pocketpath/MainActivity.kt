@@ -2,6 +2,8 @@ package com.pocketpath
 
 import com.pocketpath.feature.finance.FinanceViewModel
 import com.pocketpath.feature.income.ManualIncomeViewModel
+import com.pocketpath.feature.income.ExpectedPaymentsViewModel
+import com.pocketpath.feature.income.ExpectedPaymentCreationViewModel
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -22,6 +24,8 @@ class MainActivity : ComponentActivity() {
         val authViewModel = ViewModelProvider(this)[AuthViewModel::class.java]
         val financeViewModel = ViewModelProvider(this)[FinanceViewModel::class.java]
         val incomeViewModel = ViewModelProvider(this)[ManualIncomeViewModel::class.java]
+        val expectedPaymentsViewModel = ViewModelProvider(this)[ExpectedPaymentsViewModel::class.java]
+        val expectedPaymentCreationViewModel = ViewModelProvider(this)[ExpectedPaymentCreationViewModel::class.java]
 
         setContent {
             PocketPathTheme {
@@ -29,6 +33,8 @@ class MainActivity : ComponentActivity() {
                     viewModel = authViewModel,
                     financeViewModel = financeViewModel,
                     incomeViewModel = incomeViewModel,
+                    expectedPaymentsViewModel = expectedPaymentsViewModel,
+                    expectedPaymentCreationViewModel = expectedPaymentCreationViewModel,
                 )
             }
         }

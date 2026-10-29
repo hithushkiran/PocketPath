@@ -3,6 +3,16 @@ package com.pocketpath.feature.income
 import com.pocketpath.domain.calculation.activeExpectedPaymentTotalsByCurrency
 import com.pocketpath.domain.calculation.activeExpectedPaymentsDueIn
 import com.pocketpath.domain.model.ExpectedPayment
+import com.pocketpath.domain.model.Account
+import com.pocketpath.domain.model.AccountMovement
+import com.pocketpath.domain.model.ComponentNature
+import com.pocketpath.domain.model.FinancialTime
+import com.pocketpath.domain.model.FinancialTransaction
+import com.pocketpath.domain.model.ReportComponent
+import com.pocketpath.domain.model.TransactionKind
+import com.pocketpath.domain.model.TransactionStatus
+import com.pocketpath.domain.money.KnownLkrAmount
+import com.pocketpath.domain.money.NativeAmount
 import com.pocketpath.domain.money.FiatCurrency
 import com.pocketpath.domain.money.Money
 import com.pocketpath.domain.repository.FailureCode
@@ -22,12 +32,47 @@ data class ExpectedPaymentsUiState(
     val userId: String? = null,
     val loading: Boolean = true,
     val payments: List<ExpectedPayment> = emptyList(),
+    val accounts: List<Account> = emptyList(),
     val totalsByCurrency: Map<FiatCurrency, Money> = emptyMap(),
     val error: RepositoryFailure? = null,
     val metadata: ObservationMetadata? = null,
+    val cancellingPaymentId: String? = null,
+    val cancellationError: RepositoryFailure? = null,
+    /** An online cancellation may have reached Firestore; retain its operation ID for Retry. */
+    val hasUnresolvedCancellationRetry: Boolean = false,
+    val cancellationMessage: String? = null,
 ) {
     val isEmpty: Boolean get() = !loading && error == null && payments.isEmpty()
     val isPopulated: Boolean get() = !loading && payments.isNotEmpty()
+}
+
+/** Constructs the same posted LKR INCOME event as P02A, with the expected-payment audit link. */
+internal object ExpectedPaymentReceiptFactory {
+    fun create(
+        operationId: String,
+        payment: ExpectedPayment,
+        accountId: String?,
+        amountText: String,
+        accounts: List<Account>,
+        now: java.time.Instant,
+        zone: java.time.ZoneId,
+    ): FinancialTransaction {
+        val account = requireNotNull(accountId) { "Select a receiving account." }
+        require(payment.state == com.pocketpath.domain.model.ExpectedPaymentState.ACTIVE)
+        require(accounts.any { it.id == account && it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null })
+        val amount = Money.parse(amountText.trim(), FiatCurrency.LKR)
+        require(amount.minor > 0 && amount.minor <= payment.amountDue.money.minor - payment.receivedAmountMinor) {
+            "Receipt exceeds the remaining expected amount."
+        }
+        val date = now.atZone(zone).toLocalDate()
+        return FinancialTransaction(
+            operationId = operationId, kind = TransactionKind.INCOME, status = TransactionStatus.POSTED,
+            financialTime = FinancialTime(now, date, zone), clientCreatedAt = now,
+            movements = listOf(AccountMovement(account, NativeAmount.Fiat(amount))),
+            components = listOf(ReportComponent(ComponentNature.EARNING, KnownLkrAmount.Known(amount), incomeSourceId = payment.incomeSourceId)),
+            expectedPaymentId = payment.id,
+        )
+    }
 }
 
 /**

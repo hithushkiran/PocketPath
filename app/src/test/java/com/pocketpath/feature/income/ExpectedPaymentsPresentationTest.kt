@@ -73,4 +73,30 @@ class ExpectedPaymentsPresentationTest {
             )),
         )
     }
+
+    @Test fun cancellationPresentationStateIsSessionScopedAndCanSignalRetry() {
+        val state = ExpectedPaymentsUiState(
+            userId = "user-a",
+            payments = listOf(payment),
+            hasUnresolvedCancellationRetry = true,
+            cancellationError = com.pocketpath.domain.repository.RepositoryFailure(
+                com.pocketpath.domain.repository.FailureCode.NETWORK,
+                "Connection lost",
+                "cancel-operation",
+            ),
+        )
+
+        assertTrue(state.hasUnresolvedCancellationRetry)
+        assertEquals("cancel-operation", state.cancellationError?.operationId)
+        assertFalse(ExpectedPaymentsSessionState.signedOut().hasUnresolvedCancellationRetry)
+        assertNull(
+            ExpectedPaymentsSessionState.mapIfCurrent(
+                activeUserId = "user-b",
+                expectedUserId = state.userId!!,
+                observation = Observation.Data(state.payments, metadata),
+                start = LocalDate.MIN,
+                endInclusive = LocalDate.MAX,
+            ),
+        )
+    }
 }
