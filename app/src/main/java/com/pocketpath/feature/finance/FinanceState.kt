@@ -46,6 +46,13 @@ data class RejectedExpense(
     val message: String,
 )
 
+data class VoidExpenseForm(
+    val transactionId: String? = null,
+    val reason: String = "",
+    val busy: Boolean = false,
+    val error: String? = null,
+)
+
 data class FinanceUiState(
     val userId: String? = null,
     val loading: Boolean = true,
@@ -58,6 +65,8 @@ data class FinanceUiState(
     val expenseForm: ExpenseForm = ExpenseForm(),
     val categoryForm: CategoryForm = CategoryForm(),
     val showCategoryDialog: Boolean = false,
+    val voidForm: VoidExpenseForm = VoidExpenseForm(),
+    val showVoidDialog: Boolean = false,
     val activity: List<FinancialTransaction> = emptyList(),
     val activityLoading: Boolean = false,
     val activityError: String? = null,
@@ -142,6 +151,11 @@ sealed interface FinanceEvent {
     data class CategoryIconChanged(val value: String) : FinanceEvent
     data class ToggleCategoryDialog(val show: Boolean) : FinanceEvent
     data object SaveCategory : FinanceEvent
+
+    data class OpenVoidDialog(val transactionId: String) : FinanceEvent
+    data class VoidReasonChanged(val value: String) : FinanceEvent
+    data class ToggleVoidDialog(val show: Boolean) : FinanceEvent
+    data object SubmitVoidExpense : FinanceEvent
 
     data object ReloadActivity : FinanceEvent
     data object LoadMoreActivity : FinanceEvent

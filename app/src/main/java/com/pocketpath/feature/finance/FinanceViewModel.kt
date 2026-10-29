@@ -458,6 +458,29 @@ class FinanceViewModel @Inject constructor(
 
             FinanceEvent.SaveCategory -> saveCustomCategory()
 
+            is FinanceEvent.OpenVoidDialog ->
+                _state.update {
+                    it.copy(
+                        showVoidDialog = true,
+                        voidForm = VoidExpenseForm(transactionId = event.transactionId),
+                    )
+                }
+
+            is FinanceEvent.VoidReasonChanged ->
+                _state.update {
+                    it.copy(voidForm = it.voidForm.copy(reason = event.value, error = null))
+                }
+
+            is FinanceEvent.ToggleVoidDialog ->
+                _state.update {
+                    it.copy(
+                        showVoidDialog = event.show,
+                        voidForm = if (event.show) it.voidForm else VoidExpenseForm(),
+                    )
+                }
+
+            FinanceEvent.SubmitVoidExpense -> submitVoidExpense()
+
             FinanceEvent.ReloadActivity -> loadActivity(reset = true)
 
             FinanceEvent.LoadMoreActivity -> {
@@ -967,6 +990,85 @@ class FinanceViewModel @Inject constructor(
                             categoryForm = it.categoryForm.copy(
                                 busy = false,
                                 error = "Unable to save category. Connect and retry.",
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun submitVoidExpense() {
+        val current = _state.value
+        if (!current.ready || current.voidForm.busy) return
+
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        val epoch = generation
+
+        val form = current.voidForm
+        val transactionId = form.transactionId ?: return
+        val reason = form.reason.trim()
+
+        if (reason.isBlank() || reason.length > 1000) {
+            _state.update {
+                it.copy(
+                    voidForm = it.voidForm.copy(
+                        error = "Enter a valid reason for voiding this expense (up to 1000 characters).",
+                    ),
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(voidForm = it.voidForm.copy(busy = true, error = null))
+        }
+
+        val operationId = UUID.randomUUID().toString()
+
+        scope.launch {
+            try {
+                ensureActive()
+                if (epoch != generation) return@launch
+                val result = repo.voidExpense(
+                    operationId = operationId,
+                    transactionId = transactionId,
+                    voidReason = reason,
+                )
+                if (epoch != generation) return@launch
+
+                when (result) {
+                    is CommandResult.Accepted -> {
+                        _state.update {
+                            it.copy(
+                                showVoidDialog = false,
+                                voidForm = VoidExpenseForm(),
+                            )
+                        }
+                        loadActivity(reset = true)
+                    }
+
+                    is CommandResult.Rejected -> {
+                        _state.update {
+                            it.copy(
+                                voidForm = it.voidForm.copy(
+                                    busy = false,
+                                    error = result.failure.message,
+                                ),
+                            )
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (epoch == generation) {
+                    _state.update {
+                        it.copy(
+                            voidForm = it.voidForm.copy(
+                                busy = false,
+                                error = "Unable to void expense. Connect and retry.",
                             ),
                         )
                     }
