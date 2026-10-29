@@ -57,23 +57,19 @@ object OccurrenceCalculator {
             }
 
             Frequency.MONTHLY -> {
-                require(recurrence.anchorDate.dayOfMonth <= 28) {
-                    "Monthly anchors on days 29-31 require an approved short-month policy."
-                }
                 var month = YearMonth.from(recurrence.anchorDate)
                 while (!month.atDay(1).isAfter(upperBound)) {
-                    yield(month.atDay(recurrence.anchorDate.dayOfMonth))
+                    // Keep the original anchor on the schedule; only this occurrence's date clamps.
+                    yield(month.atDay(minOf(recurrence.anchorDate.dayOfMonth, month.lengthOfMonth())))
                     month = month.plusMonths(1)
                 }
             }
 
             Frequency.YEARLY -> {
-                require(!(recurrence.anchorDate.monthValue == 2 && recurrence.anchorDate.dayOfMonth == 29)) {
-                    "A yearly 29 February anchor requires an approved leap-year policy."
-                }
                 var year = recurrence.anchorDate.year
                 while (year <= upperBound.year) {
-                    yield(LocalDate.of(year, recurrence.anchorDate.monthValue, recurrence.anchorDate.dayOfMonth))
+                    val month = YearMonth.of(year, recurrence.anchorDate.monthValue)
+                    yield(month.atDay(minOf(recurrence.anchorDate.dayOfMonth, month.lengthOfMonth())))
                     year++
                 }
             }

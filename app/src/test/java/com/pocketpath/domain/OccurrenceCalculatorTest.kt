@@ -11,7 +11,6 @@ import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.Money
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
-import org.junit.Assert.assertThrows
 import org.junit.Test
 import java.time.LocalDate
 import java.time.ZoneId
@@ -88,21 +87,24 @@ class OccurrenceCalculatorTest {
         )
     }
 
-    @Test fun unsupportedMonthEndAndLeapDayPoliciesFailExplicitly() {
-        assertThrows(IllegalArgumentException::class.java) {
-            OccurrenceCalculator.incomeReminderOccurrences(
-                schedule(Recurrence(Frequency.MONTHLY, LocalDate.of(2026, 1, 31))),
-                LocalDate.of(2026, 1, 1),
-                LocalDate.of(2026, 3, 31),
-            )
-        }
-        assertThrows(IllegalArgumentException::class.java) {
-            OccurrenceCalculator.incomeReminderOccurrences(
-                schedule(Recurrence(Frequency.YEARLY, LocalDate.of(2024, 2, 29))),
-                LocalDate.of(2024, 1, 1),
-                LocalDate.of(2028, 12, 31),
-            )
-        }
+    @Test fun monthlyMonthEndAnchorsClampWithoutChangingTheScheduleAnchor() {
+        val recurrence = Recurrence(Frequency.MONTHLY, LocalDate.of(2026, 1, 31))
+        val occurrences = OccurrenceCalculator.incomeReminderOccurrences(
+            schedule(recurrence), LocalDate.of(2026, 1, 1), LocalDate.of(2026, 4, 30),
+        )
+        assertEquals(listOf("2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30"), occurrences.map { it.nominalDate.toString() })
+        assertEquals(LocalDate.of(2026, 1, 31), recurrence.anchorDate)
+        assertEquals(occurrences.map { it.id }.toSet().size, occurrences.size)
+    }
+
+    @Test fun yearlyLeapDayAnchorClampsOnlyInNonLeapYears() {
+        val recurrence = Recurrence(Frequency.YEARLY, LocalDate.of(2024, 2, 29))
+        val occurrences = OccurrenceCalculator.incomeReminderOccurrences(
+            schedule(recurrence), LocalDate.of(2024, 1, 1), LocalDate.of(2028, 12, 31),
+        )
+        assertEquals(listOf("2024-02-29", "2025-02-28", "2026-02-28", "2027-02-28", "2028-02-29"), occurrences.map { it.nominalDate.toString() })
+        assertEquals(LocalDate.of(2024, 2, 29), recurrence.anchorDate)
+        assertEquals(occurrences.map { it.id }.toSet().size, occurrences.size)
     }
 
     private fun schedule(
