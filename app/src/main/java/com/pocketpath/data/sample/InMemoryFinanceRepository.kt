@@ -20,16 +20,20 @@ class InMemoryFinanceRepository(
     override val userId: String,
     private val clock: Clock,
     initialCategories: List<Category> = emptyList(),
-) : AccountRepository, LedgerRepository, CategoryRepository {
+) : AccountRepository, LedgerRepository, CategoryRepository, BudgetRepository {
     private data class Snapshot(
         val accounts: Map<String, Account> = emptyMap(),
         val events: Map<String, FinancialTransaction> = emptyMap(),
-        val categories: Map<String, Category>, val revision: Long = 0,
+        val categories: Map<String, Category>,
+        val budgets: Map<String, Budget> = emptyMap(),
+        val revision: Long = 0,
     )
     private sealed interface Applied {
         data class AccountCreated(val command: CreateAccountCommand, val value: Account) : Applied
         data class ExpenseRecorded(val command: RecordExpenseCommand, val value: FinancialTransaction) : Applied
         data class CategorySaved(val category: Category) : Applied
+        data class BudgetSaved(val budget: Budget) : Applied
+        data class ExpenseVoided(val value: FinancialTransaction) : Applied
     }
     private val mutex = Mutex()
     private val applied = mutableMapOf<String, Applied>()
@@ -150,6 +154,100 @@ class InMemoryFinanceRepository(
             CommandResult.Accepted(category, WriteState.LOCAL_SAVED)
         } catch (error: IllegalArgumentException) { invalid(operationId, error) }
         catch (error: ArithmeticException) { invalid(operationId, error) }
+    }
+
+    override fun observeBudgets(): Flow<Observation<List<Budget>>> = state.map { data(it.budgets.values.sortedBy(Budget::id)) }
+
+    override suspend fun saveBudget(operationId: String, budget: Budget): CommandResult<Budget> = mutex.withLock {
+        val previous = applied[operationId]
+        if (previous != null) return@withLock if (previous is Applied.BudgetSaved && previous.budget == budget)
+            CommandResult.Accepted(previous.budget, WriteState.LOCAL_SAVED, true) else conflict(operationId)
+        try {
+            checkId(operationId)
+            checkId(budget.id)
+            require(budget.limit.money.currency == FiatCurrency.LKR)
+            require(budget.limit.money.minor > 0L)
+            require(!budget.rolloverEnabled)
+            if (budget.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+                require(!budget.categoryId.isNullOrBlank())
+                checkId(budget.categoryId)
+            } else {
+                require(budget.categoryId == null)
+            }
+            applied[operationId] = Applied.BudgetSaved(budget)
+            state.value = state.value.copy(budgets = state.value.budgets + (budget.id to budget), revision = state.value.revision + 1)
+            CommandResult.Accepted(budget, WriteState.LOCAL_SAVED)
+        } catch (error: IllegalArgumentException) { invalid(operationId, error) }
+        catch (error: ArithmeticException) { invalid(operationId, error) }
+    }
+
+    suspend fun voidExpense(
+        operationId: String,
+        transactionId: String,
+        voidReason: String,
+        voidedAt: java.time.Instant = clock.instant(),
+    ): CommandResult<FinancialTransaction> = mutex.withLock {
+        val previous = applied[operationId]
+        if (previous != null) {
+            return@withLock if (previous is Applied.ExpenseVoided && previous.value.id == transactionId && previous.value.voidMetadata?.voidReason == voidReason.trim()) {
+                CommandResult.Accepted(previous.value, WriteState.LOCAL_SAVED, true)
+            } else {
+                conflict(operationId)
+            }
+        }
+
+        try {
+            checkId(operationId)
+            checkId(transactionId)
+            require(voidReason.isNotBlank() && voidReason.length <= 1000) { "Enter a valid void reason." }
+
+            val existingEvent = requireNotNull(state.value.events[transactionId]) { "Expense transaction not found" }
+            System.err.println("DEBUG_VOID: existingEvent.id='${existingEvent.id}' operationId='${existingEvent.operationId}'")
+            require(existingEvent.kind == TransactionKind.EXPENSE) { "Only expense transactions can be voided" }
+            if (existingEvent.status == TransactionStatus.VOIDED) {
+                require(existingEvent.voidMetadata?.voidReason == voidReason.trim()) { "This expense has already been voided" }
+                return@withLock CommandResult.Accepted(existingEvent, WriteState.LOCAL_SAVED, true)
+            }
+
+            val voidMetadata = VoidMetadata(voidedAt = voidedAt, voidReason = voidReason.trim())
+            val updatedEvent = FinancialTransaction(
+                operationId = existingEvent.operationId,
+                kind = existingEvent.kind,
+                status = TransactionStatus.VOIDED,
+                financialTime = existingEvent.financialTime,
+                clientCreatedAt = existingEvent.clientCreatedAt,
+                movements = existingEvent.movements,
+                components = existingEvent.components,
+                reservationEffects = existingEvent.reservationEffects,
+                valuations = existingEvent.valuations,
+                occurrenceId = existingEvent.occurrenceId,
+                expectedPaymentId = existingEvent.expectedPaymentId,
+                originalTransactionId = existingEvent.originalTransactionId,
+                goalPlanId = existingEvent.goalPlanId,
+                note = existingEvent.note,
+                merchantLabel = existingEvent.merchantLabel,
+                cryptoTrade = existingEvent.cryptoTrade,
+                replacesTransactionId = existingEvent.replacesTransactionId,
+                voidMetadata = voidMetadata,
+                createdAt = existingEvent.createdAt,
+                schemaVersion = existingEvent.schemaVersion,
+                revision = existingEvent.revision,
+            )
+
+            applied[operationId] = Applied.ExpenseVoided(updatedEvent)
+            state.value = state.value.copy(
+                events = state.value.events + (transactionId to updatedEvent),
+                revision = state.value.revision + 1,
+            )
+
+            CommandResult.Accepted(updatedEvent, WriteState.LOCAL_SAVED)
+        } catch (error: IllegalArgumentException) {
+            invalid(operationId, error)
+        } catch (error: IllegalStateException) {
+            invalid(operationId, error)
+        } catch (error: ArithmeticException) {
+            invalid(operationId, error)
+        }
     }
 
     override suspend fun activityPage(query: ActivityQuery): Observation<ActivityPage> {

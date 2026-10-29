@@ -51,6 +51,9 @@ class FinanceViewModel @Inject constructor(
             drafts?.expenseCommand = value
         }
 
+    private var pendingBudget: Budget? = null
+    private var pendingBudgetOperationId: String? = null
+
     private var activityJob: Job? = null
     private var activityRequest = 0
 
@@ -157,18 +160,21 @@ class FinanceViewModel @Inject constructor(
                             combine(
                                 current.observeAccounts(),
                                 current.observeEffectiveLedger(),
-                                current.observeCategories(),
-                            ) { accounts, ledger, categories ->
-                                Triple(accounts, ledger, categories)
-                            }.collect { (accounts, ledger, categories) ->
+                                combine(current.observeCategories(), current.observeBudgets(), ::Pair),
+                            ) { accounts, ledger, (categories, budgets) ->
+                                Triple(accounts, ledger, categories to budgets)
+                            }.collect { (accounts, ledger, catAndBud) ->
                                 if (epoch != generation) return@collect
+                                val (categories, budgets) = catAndBud
 
                                 val accountData = accounts as? Observation.Data
                                 val categoryData = categories as? Observation.Data
+                                val budgetData = budgets as? Observation.Data
 
                                 _state.update { old ->
                                     val availableAccounts = accountData?.value ?: old.accounts
                                     val availableCategories = categoryData?.value ?: old.categories
+                                    val availableBudgets = budgetData?.value ?: old.budgets
                                     val selectableAccounts = availableAccounts.filter {
                                         it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null
                                     }
@@ -202,6 +208,7 @@ class FinanceViewModel @Inject constructor(
                                     old.copy(
                                         accounts = availableAccounts,
                                         categories = availableCategories,
+                                        budgets = availableBudgets,
                                         referencesReady = accountData != null && categoryData != null,
                                         expenseForm = form,
                                     )
@@ -432,6 +439,115 @@ class FinanceViewModel @Inject constructor(
                     }
                 }
             }
+
+            is FinanceEvent.CategoryNameChanged ->
+                _state.update {
+                    it.copy(categoryForm = it.categoryForm.copy(name = event.value, error = null))
+                }
+
+            is FinanceEvent.CategoryClassChanged ->
+                _state.update {
+                    it.copy(categoryForm = it.categoryForm.copy(classification = event.value, error = null))
+                }
+
+            is FinanceEvent.CategoryIconChanged ->
+                _state.update {
+                    it.copy(categoryForm = it.categoryForm.copy(iconKey = event.value, error = null))
+                }
+
+            is FinanceEvent.ToggleCategoryDialog ->
+                _state.update {
+                    it.copy(
+                        showCategoryDialog = event.show,
+                        categoryForm = if (event.show) CategoryForm() else it.categoryForm,
+                    )
+                }
+
+            FinanceEvent.SaveCategory -> saveCustomCategory()
+
+            is FinanceEvent.OpenVoidDialog ->
+                _state.update {
+                    it.copy(
+                        showVoidDialog = true,
+                        voidForm = VoidExpenseForm(transactionId = event.transactionId),
+                    )
+                }
+
+            is FinanceEvent.VoidReasonChanged ->
+                _state.update {
+                    it.copy(voidForm = it.voidForm.copy(reason = event.value, error = null))
+                }
+
+            is FinanceEvent.ToggleVoidDialog ->
+                _state.update {
+                    it.copy(
+                        showVoidDialog = event.show,
+                        voidForm = if (event.show) it.voidForm else VoidExpenseForm(),
+                    )
+                }
+
+            FinanceEvent.SubmitVoidExpense -> submitVoidExpense()
+
+            is FinanceEvent.BudgetScopeChanged -> {
+                pendingBudget = null
+                pendingBudgetOperationId = null
+                _state.update {
+                    val defaultCatId = if (event.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+                        it.budgetForm.categoryId ?: it.selectableCategories.firstOrNull()?.id
+                    } else null
+                    it.copy(
+                        budgetForm = it.budgetForm.copy(
+                            scope = event.scope,
+                            categoryId = defaultCatId,
+                            error = null,
+                        ),
+                    )
+                }
+            }
+
+            is FinanceEvent.BudgetPeriodChanged -> {
+                pendingBudget = null
+                pendingBudgetOperationId = null
+                _state.update {
+                    it.copy(budgetForm = it.budgetForm.copy(periodType = event.period, error = null))
+                }
+            }
+
+            is FinanceEvent.BudgetCategoryChanged -> {
+                pendingBudget = null
+                pendingBudgetOperationId = null
+                _state.update {
+                    it.copy(budgetForm = it.budgetForm.copy(categoryId = event.categoryId, error = null))
+                }
+            }
+
+            is FinanceEvent.BudgetLimitChanged -> {
+                pendingBudget = null
+                pendingBudgetOperationId = null
+                _state.update {
+                    it.copy(budgetForm = it.budgetForm.copy(limitAmount = event.amount, error = null))
+                }
+            }
+
+            is FinanceEvent.ToggleBudgetDialog -> {
+                if (!event.show) {
+                    pendingBudget = null
+                    pendingBudgetOperationId = null
+                }
+                _state.update {
+                    val defaultCatId = it.selectableCategories.firstOrNull()?.id
+                    it.copy(
+                        showBudgetDialog = event.show,
+                        budgetForm = if (event.show) {
+                            BudgetForm(categoryId = defaultCatId)
+                        } else {
+                            it.budgetForm
+                        },
+                    )
+                }
+            }
+
+            FinanceEvent.SubmitBudget -> submitBudget()
 
             FinanceEvent.ReloadActivity -> loadActivity(reset = true)
 
@@ -841,6 +957,334 @@ class FinanceViewModel @Inject constructor(
                         it.copy(
                             activityLoading = false,
                             activityError = "Unable to load Activity. Please retry.",
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun saveCustomCategory() {
+        val current = _state.value
+        if (!current.ready || current.categoryForm.busy) return
+
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        val epoch = generation
+
+        val draft = current.categoryForm
+        val name = draft.name.trim()
+        if (name.isBlank() || name.length > 80) {
+            _state.update {
+                it.copy(
+                    categoryForm = it.categoryForm.copy(
+                        error = "Enter a valid category name (up to 80 characters).",
+                    ),
+                )
+            }
+            return
+        }
+
+        if (current.selectableCategories.any { it.name.equals(name, ignoreCase = true) }) {
+            _state.update {
+                it.copy(
+                    categoryForm = it.categoryForm.copy(
+                        error = "A category with this name already exists.",
+                    ),
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(
+                categoryForm = it.categoryForm.copy(
+                    busy = true,
+                    error = null,
+                ),
+            )
+        }
+
+        val newCategoryId = UUID.randomUUID().toString()
+        val category = Category(
+            id = newCategoryId,
+            name = name,
+            defaultCommitmentClass = draft.classification,
+            iconKey = draft.iconKey.trim().takeIf { it.isNotEmpty() },
+            sortOrder = (current.categories.maxOfOrNull { it.sortOrder } ?: 0) + 1,
+        )
+
+        val operationId = UUID.randomUUID().toString()
+
+        scope.launch {
+            try {
+                ensureActive()
+                if (epoch != generation) return@launch
+                val result = repo.saveCategory(operationId, category)
+                if (epoch != generation) return@launch
+
+                when (result) {
+                    is CommandResult.Accepted -> {
+                        _state.update { old ->
+                            val updatedExpenseForm = old.expenseForm.copy(
+                                categoryId = category.id,
+                                classification = category.defaultCommitmentClass,
+                            )
+                            old.copy(
+                                showCategoryDialog = false,
+                                categoryForm = CategoryForm(),
+                                expenseForm = updatedExpenseForm,
+                            )
+                        }
+                    }
+
+                    is CommandResult.Rejected -> {
+                        _state.update {
+                            it.copy(
+                                categoryForm = it.categoryForm.copy(
+                                    busy = false,
+                                    error = result.failure.message,
+                                ),
+                            )
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (epoch == generation) {
+                    _state.update {
+                        it.copy(
+                            categoryForm = it.categoryForm.copy(
+                                busy = false,
+                                error = "Unable to save category. Connect and retry.",
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun submitVoidExpense() {
+        val current = _state.value
+        if (!current.ready || current.voidForm.busy) return
+
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        val epoch = generation
+
+        val form = current.voidForm
+        val transactionId = form.transactionId ?: return
+        val reason = form.reason.trim()
+
+        if (reason.isBlank() || reason.length > 1000) {
+            _state.update {
+                it.copy(
+                    voidForm = it.voidForm.copy(
+                        error = "Enter a valid reason for voiding this expense (up to 1000 characters).",
+                    ),
+                )
+            }
+            return
+        }
+
+        _state.update {
+            it.copy(voidForm = it.voidForm.copy(busy = true, error = null))
+        }
+
+        val operationId = UUID.randomUUID().toString()
+
+        scope.launch {
+            try {
+                ensureActive()
+                if (epoch != generation) return@launch
+                val result = repo.voidExpense(
+                    operationId = operationId,
+                    transactionId = transactionId,
+                    voidReason = reason,
+                )
+                if (epoch != generation) return@launch
+
+                when (result) {
+                    is CommandResult.Accepted -> {
+                        _state.update {
+                            it.copy(
+                                showVoidDialog = false,
+                                voidForm = VoidExpenseForm(),
+                            )
+                        }
+                        loadActivity(reset = true)
+                    }
+
+                    is CommandResult.Rejected -> {
+                        _state.update {
+                            it.copy(
+                                voidForm = it.voidForm.copy(
+                                    busy = false,
+                                    error = result.failure.message,
+                                ),
+                            )
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (epoch == generation) {
+                    _state.update {
+                        it.copy(
+                            voidForm = it.voidForm.copy(
+                                busy = false,
+                                error = "Unable to void expense. Connect and retry.",
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun submitBudget() {
+        val current = _state.value
+        if (!current.ready || current.budgetForm.busy) return
+
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        val epoch = generation
+
+        val form = current.budgetForm
+        val rawAmount = form.limitAmount.trim()
+
+        val parsedMoney = try {
+            val money = Money.parse(rawAmount, FiatCurrency.LKR)
+            require(money.minor > 0L) { "Spending limit must be greater than zero." }
+            EntryAmount(money)
+        } catch (_: Exception) {
+            _state.update {
+                it.copy(
+                    budgetForm = it.budgetForm.copy(
+                        error = "Enter a positive LKR amount with at most two decimal places.",
+                    ),
+                )
+            }
+            return
+        }
+
+        if (form.scope == BudgetScope.CATEGORY_DISCRETIONARY && form.categoryId.isNullOrBlank()) {
+            _state.update {
+                it.copy(
+                    budgetForm = it.budgetForm.copy(
+                        error = "Select a category for category spending limits.",
+                    ),
+                )
+            }
+            return
+        }
+
+        val categoryId = if (form.scope == BudgetScope.CATEGORY_DISCRETIONARY) form.categoryId else null
+
+        // Check if form parameters match current pending budget
+        val isPendingReuse = pendingBudget?.let { pending ->
+            pending.scope == form.scope &&
+                pending.periodType == form.periodType &&
+                pending.categoryId == categoryId &&
+                pending.limit == parsedMoney
+        } ?: false
+
+        // Safeguard: Check if an active budget already exists for this exact slot (ignoring our pending budget)
+        val today = LocalDate.now(zone)
+        val isSlotOccupied = current.budgets.any {
+            it.id != pendingBudget?.id &&
+                it.state == BudgetState.ACTIVE &&
+                it.scope == form.scope &&
+                it.periodType == form.periodType &&
+                it.categoryId == categoryId &&
+                !it.effectiveFrom.isAfter(today) &&
+                (it.effectiveTo == null || !it.effectiveTo.isBefore(today))
+        }
+
+        if (isSlotOccupied) {
+            _state.update {
+                it.copy(
+                    budgetForm = it.budgetForm.copy(
+                        error = "An active budget already exists for this scope and period.",
+                    ),
+                )
+            }
+            return
+        }
+
+        val (budget, operationId) = if (isPendingReuse && pendingBudget != null && pendingBudgetOperationId != null) {
+            pendingBudget!! to pendingBudgetOperationId!!
+        } else {
+            val newBudgetId = UUID.randomUUID().toString()
+            val newOpId = UUID.randomUUID().toString()
+            val newBudget = Budget(
+                id = newBudgetId,
+                scope = form.scope,
+                periodType = form.periodType,
+                limit = parsedMoney,
+                effectiveFrom = today,
+                categoryId = categoryId,
+                rolloverEnabled = false,
+                state = BudgetState.ACTIVE,
+            )
+            pendingBudget = newBudget
+            pendingBudgetOperationId = newOpId
+            newBudget to newOpId
+        }
+
+        _state.update {
+            it.copy(budgetForm = it.budgetForm.copy(busy = true, error = null))
+        }
+
+        scope.launch {
+            try {
+                ensureActive()
+                if (epoch != generation) return@launch
+                val result = repo.saveBudget(operationId, budget)
+                if (epoch != generation) return@launch
+
+                when (result) {
+                    is CommandResult.Accepted -> {
+                        pendingBudget = null
+                        pendingBudgetOperationId = null
+                        _state.update {
+                            it.copy(
+                                showBudgetDialog = false,
+                                budgetForm = BudgetForm(),
+                            )
+                        }
+                    }
+
+                    is CommandResult.Rejected -> {
+                        val uncertain = result.failure.code == FailureCode.NETWORK
+                        if (!uncertain) {
+                            pendingBudget = null
+                            pendingBudgetOperationId = null
+                        }
+
+                        _state.update {
+                            it.copy(
+                                budgetForm = it.budgetForm.copy(
+                                    busy = false,
+                                    error = result.failure.message,
+                                ),
+                            )
+                        }
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                if (epoch == generation) {
+                    _state.update {
+                        it.copy(
+                            budgetForm = it.budgetForm.copy(
+                                busy = false,
+                                error = "Unable to save budget. Connect and retry.",
+                            ),
                         )
                     }
                 }

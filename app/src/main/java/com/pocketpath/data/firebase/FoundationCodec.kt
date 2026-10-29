@@ -37,6 +37,11 @@ internal object FoundationCodec {
         "schemaVersion", "createdAt", "updatedAt",
     )
 
+    private val budgetRequired = setOf(
+        "scope", "periodType", "limitLkrMinor", "effectiveFrom",
+        "rolloverEnabled", "state", "createdAt", "updatedAt", "revision",
+    )
+
     fun categoryData(category: Category): Map<String, Any> {
         checkId(category.id)
         require(category.metadata == RecordMetadata())
@@ -201,13 +206,15 @@ internal object FoundationCodec {
     fun eventData(event: FinancialTransaction): Map<String, Any> {
         checkId(event.id)
         require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE))
-        require(event.status == TransactionStatus.POSTED && event.revision == 0L)
+        require(event.revision == 0L)
+        require((event.status == TransactionStatus.VOIDED) == (event.voidMetadata != null))
         require(event.movements.size == 1)
         require(event.reservationEffects.isEmpty() && event.valuations.isEmpty())
         require(event.occurrenceId == null && event.expectedPaymentId == null)
         require(event.originalTransactionId == null && event.goalPlanId == null)
-        require(event.replacesTransactionId == null && event.cryptoTrade == null)
+        require(event.cryptoTrade == null)
         require(event.merchantLabel == null || event.merchantLabel.length <= 1000)
+        event.replacesTransactionId?.let { checkId(it) }
 
         val movement = event.movements.single()
         checkId(movement.accountId)
@@ -263,6 +270,16 @@ internal object FoundationCodec {
             put("valuations", emptyList<Any>())
             event.note?.let { put("note", it) }
             event.merchantLabel?.let { put("merchantLabel", it) }
+            event.replacesTransactionId?.let { put("replacesTransactionId", it) }
+            event.voidMetadata?.let { voidMeta ->
+                put(
+                    "voidMetadata",
+                    mapOf(
+                        "voidedAt" to timestamp(voidMeta.voidedAt),
+                        "voidReason" to voidMeta.voidReason,
+                    ),
+                )
+            }
         }
     }
 
@@ -272,11 +289,31 @@ internal object FoundationCodec {
         pending: Boolean = false,
     ): FinancialTransaction {
         checkId(id)
-        data.checkKeys(eventRequired, setOf("note", "merchantLabel"))
+        data.checkKeys(
+            eventRequired,
+            setOf("note", "merchantLabel", "voidMetadata", "replacesTransactionId"),
+        )
         require(data.text("operationId") == id)
         require(data.integer("schemaVersion") == 1L)
         require(data.integer("revision") == 0L)
-        require(data.text("status") == "POSTED")
+
+        val status = TransactionStatus.valueOf(data.text("status"))
+        require(status in setOf(TransactionStatus.POSTED, TransactionStatus.VOIDED))
+
+        val voidMetaMap = data.optionalMap("voidMetadata")
+        val voidMetadata = if (status == TransactionStatus.VOIDED) {
+            requireNotNull(voidMetaMap) { "Voided transactions require voidMetadata" }
+            voidMetaMap.checkKeys(setOf("voidedAt", "voidReason"))
+            val voidedAt = voidMetaMap.instant("voidedAt")
+            val voidReason = voidMetaMap.text("voidReason")
+            require(voidReason.isNotBlank() && voidReason.length <= 1000)
+            VoidMetadata(voidedAt, voidReason)
+        } else {
+            require(voidMetaMap == null) { "Posted transactions must not have voidMetadata" }
+            null
+        }
+
+        val replacesTransactionId = data.optionalText("replacesTransactionId")?.also(::checkId)
 
         val kind = TransactionKind.valueOf(data.text("kind"))
         require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE)) {
@@ -319,7 +356,7 @@ internal object FoundationCodec {
         val result = FinancialTransaction(
             operationId = id,
             kind = kind,
-            status = TransactionStatus.POSTED,
+            status = status,
             financialTime = FinancialTime(
                 occurredAt = data.instant("occurredAt"),
                 occurredLocalDate = LocalDate.parse(data.text("occurredLocalDate")),
@@ -330,6 +367,8 @@ internal object FoundationCodec {
             components = components,
             note = data.optionalText("note"),
             merchantLabel = data.optionalText("merchantLabel"),
+            replacesTransactionId = replacesTransactionId,
+            voidMetadata = voidMetadata,
             createdAt = if (pending && data["createdAt"] == null) {
                 null
             } else {
@@ -347,6 +386,75 @@ internal object FoundationCodec {
         return result
     }
 
+    fun budgetData(budget: Budget): Map<String, Any> {
+        checkId(budget.id)
+        require(budget.limit.money.currency == FiatCurrency.LKR)
+        require(budget.limit.money.minor > 0L)
+        require(!budget.rolloverEnabled)
+        if (budget.scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+            require(!budget.categoryId.isNullOrBlank()) {
+                "Category discretionary budget requires a category ID"
+            }
+            checkId(budget.categoryId)
+        } else {
+            require(budget.categoryId == null)
+        }
+
+        return buildMap {
+            put("scope", budget.scope.name)
+            put("periodType", budget.periodType.name)
+            put("limitLkrMinor", budget.limit.money.minor)
+            put("effectiveFrom", budget.effectiveFrom.toString())
+            put("rolloverEnabled", false)
+            put("state", budget.state.name)
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+            put("revision", budget.metadata.revision)
+            budget.effectiveTo?.let { put("effectiveTo", it.toString()) }
+            budget.categoryId?.let { put("categoryId", it) }
+        }
+    }
+
+    fun budget(id: String, data: FirestoreFields): Budget {
+        checkId(id)
+        data.checkKeys(
+            budgetRequired,
+            setOf("effectiveTo", "categoryId"),
+        )
+        val limitMinor = data.integer("limitLkrMinor")
+        require(limitMinor > 0L)
+
+        val scope = BudgetScope.valueOf(data.text("scope"))
+        val periodType = BudgetPeriod.valueOf(data.text("periodType"))
+        val categoryId = data.optionalText("categoryId")
+        if (scope == BudgetScope.CATEGORY_DISCRETIONARY) {
+            require(!categoryId.isNullOrBlank())
+            checkId(categoryId)
+        } else {
+            require(categoryId == null)
+        }
+
+        val effectiveFrom = LocalDate.parse(data.text("effectiveFrom"))
+        val effectiveTo = data.optionalText("effectiveTo")?.let(LocalDate::parse)
+
+        return Budget(
+            id = id,
+            scope = scope,
+            periodType = periodType,
+            limit = EntryAmount(Money.lkr(limitMinor)),
+            effectiveFrom = effectiveFrom,
+            effectiveTo = effectiveTo,
+            categoryId = categoryId,
+            rolloverEnabled = data.boolean("rolloverEnabled"),
+            state = BudgetState.valueOf(data.text("state")),
+            metadata = RecordMetadata(
+                createdAt = data.instant("createdAt"),
+                updatedAt = data.instant("updatedAt"),
+                revision = data.integer("revision"),
+            ),
+        )
+    }
+
     fun sameAccount(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
             expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
@@ -354,6 +462,14 @@ internal object FoundationCodec {
     fun sameEvent(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys { it != "createdAt" } ==
             expected.filterKeys { it != "createdAt" }
+
+    fun sameCategory(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
+            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
+
+    fun sameBudget(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
+            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
 
     private fun FirestoreFields.checkKeys(
         required: Set<String>,
@@ -418,4 +534,15 @@ internal object FoundationCodec {
                 key to entry.value
             }
         }
+
+    private fun FirestoreFields.optionalMap(name: String): FirestoreFields? {
+        if (name !in this || this[name] == null) return null
+        val value = this[name]
+        require(value is Map<*, *>) { "Expected a map field: $name" }
+        return value.entries.associate { entry ->
+            val key = entry.key
+            require(key is String)
+            key to entry.value
+        }
+    }
 }

@@ -2,6 +2,9 @@ package com.pocketpath.feature.finance
 
 import com.pocketpath.domain.calculation.AccountBalance
 import com.pocketpath.domain.model.Account
+import com.pocketpath.domain.model.Budget
+import com.pocketpath.domain.model.BudgetPeriod
+import com.pocketpath.domain.model.BudgetScope
 import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
@@ -16,6 +19,14 @@ data class CashAccountForm(
     val busy: Boolean = false,
     val locked: Boolean = false,
     val saved: Boolean = false,
+    val error: String? = null,
+)
+
+data class CategoryForm(
+    val name: String = "",
+    val classification: CommitmentClass = CommitmentClass.DISCRETIONARY,
+    val iconKey: String = "",
+    val busy: Boolean = false,
     val error: String? = null,
 )
 
@@ -38,16 +49,39 @@ data class RejectedExpense(
     val message: String,
 )
 
+data class VoidExpenseForm(
+    val transactionId: String? = null,
+    val reason: String = "",
+    val busy: Boolean = false,
+    val error: String? = null,
+)
+
+data class BudgetForm(
+    val scope: BudgetScope = BudgetScope.OVERALL_DISCRETIONARY,
+    val periodType: BudgetPeriod = BudgetPeriod.MONTHLY,
+    val categoryId: String? = null,
+    val limitAmount: String = "",
+    val busy: Boolean = false,
+    val error: String? = null,
+)
+
 data class FinanceUiState(
     val userId: String? = null,
     val loading: Boolean = true,
     val error: String? = null,
     val accounts: List<Account> = emptyList(),
     val categories: List<Category> = emptyList(),
+    val budgets: List<Budget> = emptyList(),
     val balances: Map<String, AccountBalance> = emptyMap(),
     val poolBalanceMinor: Long? = null,
     val accountForm: CashAccountForm = CashAccountForm(),
     val expenseForm: ExpenseForm = ExpenseForm(),
+    val categoryForm: CategoryForm = CategoryForm(),
+    val showCategoryDialog: Boolean = false,
+    val voidForm: VoidExpenseForm = VoidExpenseForm(),
+    val showVoidDialog: Boolean = false,
+    val budgetForm: BudgetForm = BudgetForm(),
+    val showBudgetDialog: Boolean = false,
     val activity: List<FinancialTransaction> = emptyList(),
     val activityLoading: Boolean = false,
     val activityError: String? = null,
@@ -126,6 +160,24 @@ sealed interface FinanceEvent {
     data class ExpenseClassChanged(val value: CommitmentClass) : FinanceEvent
     data object SaveExpense : FinanceEvent
     data object NewExpense : FinanceEvent
+
+    data class CategoryNameChanged(val value: String) : FinanceEvent
+    data class CategoryClassChanged(val value: CommitmentClass) : FinanceEvent
+    data class CategoryIconChanged(val value: String) : FinanceEvent
+    data class ToggleCategoryDialog(val show: Boolean) : FinanceEvent
+    data object SaveCategory : FinanceEvent
+
+    data class OpenVoidDialog(val transactionId: String) : FinanceEvent
+    data class VoidReasonChanged(val value: String) : FinanceEvent
+    data class ToggleVoidDialog(val show: Boolean) : FinanceEvent
+    data object SubmitVoidExpense : FinanceEvent
+
+    data class BudgetScopeChanged(val scope: BudgetScope) : FinanceEvent
+    data class BudgetPeriodChanged(val period: BudgetPeriod) : FinanceEvent
+    data class BudgetCategoryChanged(val categoryId: String) : FinanceEvent
+    data class BudgetLimitChanged(val amount: String) : FinanceEvent
+    data class ToggleBudgetDialog(val show: Boolean) : FinanceEvent
+    data object SubmitBudget : FinanceEvent
 
     data object ReloadActivity : FinanceEvent
     data object LoadMoreActivity : FinanceEvent

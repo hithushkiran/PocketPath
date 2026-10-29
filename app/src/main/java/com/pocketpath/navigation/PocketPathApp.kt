@@ -186,7 +186,12 @@ fun PocketPathApp(
                     onEvent = onFinanceEvent,
                 )
             }
-            composable<Plan> { PlanScreen() }
+            composable<Plan> {
+                PlanScreen(
+                    state = financeState,
+                    onEvent = onFinanceEvent,
+                )
+            }
             composable<Goals> { GoalsScreen() }
             composable<Add> {
                 AddScreen(
