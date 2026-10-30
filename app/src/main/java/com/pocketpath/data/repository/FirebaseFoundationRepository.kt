@@ -1,6 +1,7 @@
 package com.pocketpath.data.repository
 
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
 import com.google.firebase.firestore.MetadataChanges
@@ -335,6 +336,20 @@ class FirebaseFoundationRepository internal constructor(
                     voidReason = voidReason.trim(),
                 )
 
+                val voidMetadataMap = mapOf(
+                    "voidedAt" to FoundationCodec.storedInstant(voidedAt),
+                    "voidReason" to voidReason.trim(),
+                )
+
+                val updateFields = mutableMapOf<String, Any?>(
+                    "status" to TransactionStatus.VOIDED.name,
+                    "voidMetadata" to voidMetadataMap,
+                    "updatedAt" to FieldValue.serverTimestamp(),
+                    "revision" to existingEvent.revision + 1,
+                )
+
+                transaction.update(reference, updateFields)
+
                 val updatedEvent = FinancialTransaction(
                     operationId = existingEvent.operationId,
                     kind = existingEvent.kind,
@@ -356,11 +371,8 @@ class FirebaseFoundationRepository internal constructor(
                     voidMetadata = voidMetadata,
                     createdAt = existingEvent.createdAt,
                     schemaVersion = existingEvent.schemaVersion,
-                    revision = existingEvent.revision,
+                    revision = existingEvent.revision + 1,
                 )
-
-                val updatedData = FoundationCodec.eventData(updatedEvent)
-                transaction.set(reference, updatedData)
 
                 Applied(updatedEvent)
             }

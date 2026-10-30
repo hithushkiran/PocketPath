@@ -231,7 +231,7 @@ class InMemoryFinanceRepository(
                 voidMetadata = voidMetadata,
                 createdAt = existingEvent.createdAt,
                 schemaVersion = existingEvent.schemaVersion,
-                revision = existingEvent.revision,
+                revision = existingEvent.revision + 1,
             )
 
             applied[operationId] = Applied.ExpenseVoided(updatedEvent)

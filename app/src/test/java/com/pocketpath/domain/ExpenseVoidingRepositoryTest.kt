@@ -151,6 +151,9 @@ class ExpenseVoidingRepositoryTest {
         assertEquals(original.components, voided.components)
         assertEquals(original.note, voided.note)
         assertEquals(original.financialTime, voided.financialTime)
+        assertEquals(original.createdAt, voided.createdAt)
+        assertEquals(original.clientCreatedAt, voided.clientCreatedAt)
+        assertEquals(original.revision + 1, voided.revision)
         assertEquals(TransactionStatus.VOIDED, voided.status)
         assertEquals("Duplicate", voided.voidMetadata?.voidReason)
     }
