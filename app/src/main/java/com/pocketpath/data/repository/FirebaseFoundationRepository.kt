@@ -610,13 +610,13 @@ class FirebaseFoundationRepository internal constructor(
         query.accountId?.let(FoundationCodec::checkId)
 
         val source = if (preferCachedActivity) Source.CACHE else Source.DEFAULT
-        val snapshot = effectiveQuery().get(source).await()
+        val snapshot = transactions.get(source).await()
         requireSession()
         checkLimit(snapshot)
 
         val pageMetadata = snapshotMetadata(
             snapshot,
-            coverageKey = "ledger-posted-v1",
+            coverageKey = "ledger-activity-v1",
             requireHistory = false,
         )
 

@@ -259,9 +259,9 @@ class InMemoryFinanceRepository(
             cursorParts[2].toIntOrNull()?.takeIf { it >= 0 }
                 ?: return Observation.Failed(failure(FailureCode.VALIDATION, "Invalid cursor"))
         }
-        val events = snapshot.events.values.filter { it.status == TransactionStatus.POSTED &&
-            (query.accountId == null || query.accountId in it.accountIds) }
-            .sortedWith(compareByDescending<FinancialTransaction> { it.financialTime.occurredAt }.thenByDescending { it.id })
+        val events = snapshot.events.values.filter {
+            query.accountId == null || query.accountId in it.accountIds
+        }.sortedWith(compareByDescending<FinancialTransaction> { it.financialTime.occurredAt }.thenByDescending { it.id })
         val page = events.drop(offset).take(query.pageSize)
         val next = (offset + page.size).takeIf { it < events.size }?.let { ActivityCursor("${snapshot.revision}:${query.accountId ?: "*"}:$it") }
         return Observation.Data(ActivityPage(page, next), metadata().copy(completeness = HistoryCompleteness.INCOMPLETE))
