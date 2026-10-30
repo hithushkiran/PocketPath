@@ -5,8 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.pocketpath.data.local.FinanceLocalStore
 import com.pocketpath.data.repository.FirebaseFoundationFactory
 import com.pocketpath.data.repository.FirebaseFoundationRepository
-import com.pocketpath.domain.calculation.BalanceUnits
-import com.pocketpath.domain.calculation.accountBalance
+import com.pocketpath.domain.calculation.*
 import com.pocketpath.domain.model.*
 import com.pocketpath.domain.money.*
 import com.pocketpath.domain.repository.*
@@ -170,6 +169,59 @@ class FinanceViewModel @Inject constructor(
                                 val accountData = accounts as? Observation.Data
                                 val categoryData = categories as? Observation.Data
                                 val budgetData = budgets as? Observation.Data
+                                val ledgerData = ledger as? Observation.Data
+
+                                val availableAccounts = accountData?.value ?: _state.value.accounts
+                                val availableCategories = categoryData?.value ?: _state.value.categories
+                                val availableBudgets = budgetData?.value ?: _state.value.budgets
+
+                                val today = LocalDate.now(zone)
+                                var monthlyProgress: BudgetProgress? = null
+                                var weeklyProgress: BudgetProgress? = null
+                                val categoryProgresses = mutableListOf<Pair<String, BudgetProgress>>()
+                                var commitmentBreakdown: CommitmentBreakdown? = null
+
+                                if (ledgerData != null) {
+                                    val fullLedger = ledgerData.value
+
+                                    val overallMonthly = availableBudgets.firstOrNull {
+                                        it.state == BudgetState.ACTIVE &&
+                                            it.scope == BudgetScope.OVERALL_DISCRETIONARY &&
+                                            it.periodType == BudgetPeriod.MONTHLY &&
+                                            !it.effectiveFrom.isAfter(today) &&
+                                            (it.effectiveTo == null || !it.effectiveTo.isBefore(today))
+                                    }
+                                    if (overallMonthly != null) {
+                                        monthlyProgress = calculateBudgetProgress(fullLedger, overallMonthly, today, zone)
+                                    }
+
+                                    val overallWeekly = availableBudgets.firstOrNull {
+                                        it.state == BudgetState.ACTIVE &&
+                                            it.scope == BudgetScope.OVERALL_DISCRETIONARY &&
+                                            it.periodType == BudgetPeriod.WEEKLY &&
+                                            !it.effectiveFrom.isAfter(today) &&
+                                            (it.effectiveTo == null || !it.effectiveTo.isBefore(today))
+                                    }
+                                    if (overallWeekly != null) {
+                                        weeklyProgress = calculateBudgetProgress(fullLedger, overallWeekly, today, zone)
+                                    }
+
+                                    val activeCategoryBudgets = availableBudgets.filter {
+                                        it.state == BudgetState.ACTIVE &&
+                                            it.scope == BudgetScope.CATEGORY_DISCRETIONARY &&
+                                            !it.effectiveFrom.isAfter(today) &&
+                                            (it.effectiveTo == null || !it.effectiveTo.isBefore(today))
+                                    }.sortedWith(compareByDescending<Budget> { it.effectiveFrom }.thenBy { it.id })
+
+                                    activeCategoryBudgets.forEach { budget ->
+                                        val categoryName = availableCategories.firstOrNull { it.id == budget.categoryId }?.name ?: "Category"
+                                        val progress = calculateBudgetProgress(fullLedger, budget, today, zone)
+                                        categoryProgresses.add(categoryName to progress)
+                                    }
+
+                                    val monthlyPeriod = budgetPeriodForDate(BudgetPeriod.MONTHLY, today, zone)
+                                    commitmentBreakdown = calculateCommitmentBreakdown(fullLedger, monthlyPeriod)
+                                }
 
                                 _state.update { old ->
                                     val availableAccounts = accountData?.value ?: old.accounts
@@ -209,12 +261,14 @@ class FinanceViewModel @Inject constructor(
                                         accounts = availableAccounts,
                                         categories = availableCategories,
                                         budgets = availableBudgets,
+                                        overallMonthlyBudgetProgress = monthlyProgress,
+                                        overallWeeklyBudgetProgress = weeklyProgress,
+                                        categoryBudgetProgresses = categoryProgresses,
+                                        monthlyCommitmentBreakdown = commitmentBreakdown,
                                         referencesReady = accountData != null && categoryData != null,
                                         expenseForm = form,
                                     )
                                 }
-
-                                val ledgerData = ledger as? Observation.Data
 
                                 val completeAccounts = accountData?.metadata?.completeness ==
                                     HistoryCompleteness.COMPLETE

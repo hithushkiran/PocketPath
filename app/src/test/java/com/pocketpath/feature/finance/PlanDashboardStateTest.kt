@@ -130,4 +130,89 @@ class PlanDashboardStateTest {
         assertEquals(1, filtered.size)
         assertEquals("active_b", filtered.first().id)
     }
+
+    @Test
+    fun sixtyPlusTransactionsCompleteLedgerCalculationIndependentOfActivityPagination() {
+        // Create 65 posted transactions of LKR 1,000.00 each = LKR 65,000.00 total
+        val allEvents = (1..65).map { index ->
+            expenseEvent(
+                id = "tx_$index",
+                date = LocalDate.of(2026, 10, (index % 25) + 1),
+                minor = 1000_00L,
+                categoryId = "food",
+                commitmentClass = CommitmentClass.DISCRETIONARY,
+            )
+        }
+
+        // Activity pagination contains only the first 50 records
+        val paginatedActivity = allEvents.take(50)
+        assertEquals(50, paginatedActivity.size)
+
+        // Complete ledger contains all 65 events
+        val completeLedger = CompleteLedger(allEvents)
+        assertEquals(65, completeLedger.events.size)
+
+        val overallBudget = Budget(
+            id = "overall_b1",
+            scope = BudgetScope.OVERALL_DISCRETIONARY,
+            periodType = BudgetPeriod.MONTHLY,
+            limit = EntryAmount(Money.lkr(100000_00L)),
+            effectiveFrom = LocalDate.of(2026, 10, 1),
+        )
+
+        // Progress calculated against complete ledger totals 65,000 LKR (not 50,000 LKR)
+        val progress = calculateBudgetProgress(completeLedger, overallBudget, today, zone)
+        assertEquals(65000_00L, progress.spentLkrMinor)
+        assertEquals(35000_00L, progress.remainingLkrMinor)
+        assertEquals(65.0, progress.percentageUsed, 0.001)
+
+        val monthlyPeriod = budgetPeriodForDate(BudgetPeriod.MONTHLY, today, zone)
+        val breakdown = calculateCommitmentBreakdown(completeLedger, monthlyPeriod)
+        assertEquals(65000_00L, breakdown.totalSpentLkrMinor)
+
+        // Verify FinanceUiState derived state contains complete-ledger figures independently of activity page size
+        val state = FinanceUiState(
+            activity = paginatedActivity, // 50 items in Activity page
+            overallMonthlyBudgetProgress = progress, // Derived from all 65 events
+            monthlyCommitmentBreakdown = breakdown,
+        )
+
+        assertEquals(50, state.activity.size)
+        assertEquals(65000_00L, state.overallMonthlyBudgetProgress?.spentLkrMinor)
+        assertEquals(65000_00L, state.monthlyCommitmentBreakdown?.totalSpentLkrMinor)
+    }
+
+    @Test
+    fun simultaneousWeeklyAndMonthlyOverallBudgetsCalculatedSeparately() {
+        val monthlyBudget = Budget(
+            id = "b_monthly",
+            scope = BudgetScope.OVERALL_DISCRETIONARY,
+            periodType = BudgetPeriod.MONTHLY,
+            limit = EntryAmount(Money.lkr(100000_00L)),
+            effectiveFrom = LocalDate.of(2026, 10, 1),
+        )
+
+        val weeklyBudget = Budget(
+            id = "b_weekly",
+            scope = BudgetScope.OVERALL_DISCRETIONARY,
+            periodType = BudgetPeriod.WEEKLY,
+            limit = EntryAmount(Money.lkr(25000_00L)),
+            effectiveFrom = LocalDate.of(2026, 10, 1),
+        )
+
+        val e1 = expenseEvent("e1", LocalDate.of(2026, 10, 20), 10000_00L, "dining", CommitmentClass.DISCRETIONARY)
+        val e2 = expenseEvent("e2", LocalDate.of(2026, 10, 24), 15000_00L, "groceries", CommitmentClass.DISCRETIONARY)
+
+        val ledger = CompleteLedger(listOf(e1, e2))
+
+        val monthlyProgress = calculateBudgetProgress(ledger, monthlyBudget, today, zone)
+        val weeklyProgress = calculateBudgetProgress(ledger, weeklyBudget, today, zone)
+
+        assertNotNull(monthlyProgress)
+        assertNotNull(weeklyProgress)
+        assertEquals(BudgetPeriod.MONTHLY, monthlyProgress.budget.periodType)
+        assertEquals(BudgetPeriod.WEEKLY, weeklyProgress.budget.periodType)
+        assertEquals(25000_00L, monthlyProgress.spentLkrMinor)
+        assertEquals(25000_00L, weeklyProgress.spentLkrMinor)
+    }
 }

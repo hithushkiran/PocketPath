@@ -14,7 +14,6 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import com.pocketpath.domain.calculation.*
 import com.pocketpath.domain.model.*
-import com.pocketpath.domain.repository.CompleteLedger
 import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.ui.components.FinanceChoice
@@ -29,21 +28,6 @@ fun PlanScreen(
     state: FinanceUiState = FinanceUiState(),
     onEvent: (FinanceEvent) -> Unit = {},
 ) {
-    val zone = ZoneId.of("Asia/Colombo")
-    val today = LocalDate.now(zone)
-    val ledger = CompleteLedger(state.activity)
-
-    val activeBudgets = state.budgets.filter {
-        it.state == BudgetState.ACTIVE &&
-            !it.effectiveFrom.isAfter(today) &&
-            (it.effectiveTo == null || !it.effectiveTo.isBefore(today))
-    }.sortedWith(compareByDescending<Budget> { it.effectiveFrom }.thenBy { it.id })
-    val overallBudget = activeBudgets.firstOrNull { it.scope == BudgetScope.OVERALL_DISCRETIONARY }
-    val categoryBudgets = activeBudgets.filter { it.scope == BudgetScope.CATEGORY_DISCRETIONARY }
-
-    val monthlyPeriod = budgetPeriodForDate(BudgetPeriod.MONTHLY, today, zone)
-    val breakdown = calculateCommitmentBreakdown(ledger, monthlyPeriod)
-
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
@@ -76,7 +60,11 @@ fun PlanScreen(
             }
         }
 
-        if (activeBudgets.isEmpty()) {
+        val hasBudgets = state.overallMonthlyBudgetProgress != null ||
+            state.overallWeeklyBudgetProgress != null ||
+            state.categoryBudgetProgresses.isNotEmpty()
+
+        if (!hasBudgets) {
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(
@@ -103,14 +91,19 @@ fun PlanScreen(
                 }
             }
         } else {
-            if (overallBudget != null) {
+            state.overallMonthlyBudgetProgress?.let { progress ->
                 item {
-                    val progress = calculateBudgetProgress(ledger, overallBudget, today, zone)
-                    OverallBudgetCard(progress)
+                    OverallBudgetCard("Overall Monthly Discretionary Budget", progress)
                 }
             }
 
-            if (categoryBudgets.isNotEmpty()) {
+            state.overallWeeklyBudgetProgress?.let { progress ->
+                item {
+                    OverallBudgetCard("Overall Weekly Discretionary Budget", progress)
+                }
+            }
+
+            if (state.categoryBudgetProgresses.isNotEmpty()) {
                 item {
                     Text(
                         "Category Spending Limits",
@@ -118,14 +111,9 @@ fun PlanScreen(
                     )
                 }
 
-                categoryBudgets.forEach { budget ->
+                state.categoryBudgetProgresses.forEach { (categoryName, progress) ->
                     item {
-                        val categoryName = state.categories.firstOrNull {
-                            it.id == budget.categoryId
-                        }?.name ?: "Category"
-
-                        val catProgress = calculateBudgetProgress(ledger, budget, today, zone)
-                        CategoryBudgetCard(categoryName, catProgress)
+                        CategoryBudgetCard(categoryName, progress)
                     }
                 }
             }
@@ -138,8 +126,10 @@ fun PlanScreen(
             )
         }
 
-        item {
-            SpendingBreakdownCard(breakdown)
+        state.monthlyCommitmentBreakdown?.let { breakdown ->
+            item {
+                SpendingBreakdownCard(breakdown)
+            }
         }
     }
 
@@ -268,7 +258,7 @@ fun PlanScreen(
 }
 
 @Composable
-private fun OverallBudgetCard(progress: BudgetProgress) {
+private fun OverallBudgetCard(title: String, progress: BudgetProgress) {
     val visualProgress = (progress.percentageUsed / 100.0).toFloat().coerceIn(0f, 1f)
     val indicatorColor = when {
         progress.isOverBudget -> MaterialTheme.colorScheme.error
@@ -287,7 +277,7 @@ private fun OverallBudgetCard(progress: BudgetProgress) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "Overall Discretionary Budget",
+                    title,
                     style = MaterialTheme.typography.titleMedium,
                 )
                 if (progress.isOverBudget) {

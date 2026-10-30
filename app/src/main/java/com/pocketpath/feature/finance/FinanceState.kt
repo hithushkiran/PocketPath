@@ -1,6 +1,8 @@
 package com.pocketpath.feature.finance
 
 import com.pocketpath.domain.calculation.AccountBalance
+import com.pocketpath.domain.calculation.BudgetProgress
+import com.pocketpath.domain.calculation.CommitmentBreakdown
 import com.pocketpath.domain.model.Account
 import com.pocketpath.domain.model.Budget
 import com.pocketpath.domain.model.BudgetPeriod
@@ -72,6 +74,10 @@ data class FinanceUiState(
     val accounts: List<Account> = emptyList(),
     val categories: List<Category> = emptyList(),
     val budgets: List<Budget> = emptyList(),
+    val overallMonthlyBudgetProgress: BudgetProgress? = null,
+    val overallWeeklyBudgetProgress: BudgetProgress? = null,
+    val categoryBudgetProgresses: List<Pair<String, BudgetProgress>> = emptyList(),
+    val monthlyCommitmentBreakdown: CommitmentBreakdown? = null,
     val balances: Map<String, AccountBalance> = emptyMap(),
     val poolBalanceMinor: Long? = null,
     val accountForm: CashAccountForm = CashAccountForm(),
