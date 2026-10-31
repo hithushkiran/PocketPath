@@ -5,6 +5,7 @@ import com.pocketpath.domain.model.ExpectedPaymentState
 import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.FiatCurrency
 import com.pocketpath.domain.money.Money
+import com.pocketpath.domain.repository.CompleteLedger
 import com.pocketpath.domain.repository.DataOrigin
 import com.pocketpath.domain.repository.Observation
 import com.pocketpath.domain.repository.ObservationMetadata
@@ -40,6 +41,7 @@ class ExpectedPaymentsPresentationTest {
             activeUserId = "user-a",
             expectedUserId = "user-a",
             observation = Observation.Data(listOf(payment), metadata),
+            ledger = Observation.Data(CompleteLedger(emptyList()), metadata),
             start = LocalDate.MIN,
             endInclusive = LocalDate.MAX,
         )
@@ -55,6 +57,7 @@ class ExpectedPaymentsPresentationTest {
             activeUserId = "user-b",
             expectedUserId = "user-a",
             observation = Observation.Data(listOf(payment), metadata),
+            ledger = Observation.Data(CompleteLedger(emptyList()), metadata),
             start = LocalDate.MIN,
             endInclusive = LocalDate.MAX,
         )
@@ -94,6 +97,7 @@ class ExpectedPaymentsPresentationTest {
                 activeUserId = "user-b",
                 expectedUserId = state.userId!!,
                 observation = Observation.Data(state.payments, metadata),
+                ledger = Observation.Data(CompleteLedger(emptyList()), metadata),
                 start = LocalDate.MIN,
                 endInclusive = LocalDate.MAX,
             ),

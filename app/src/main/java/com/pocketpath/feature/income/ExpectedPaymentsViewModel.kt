@@ -6,6 +6,8 @@ import com.pocketpath.data.repository.FirebaseIncomeRepositoryFactory
 import com.pocketpath.data.repository.FirebaseFoundationFactory
 import com.pocketpath.domain.model.Account
 import com.pocketpath.domain.model.ExpectedPayment
+import com.pocketpath.domain.model.StableIds
+import com.pocketpath.domain.repository.CompleteLedger
 import com.pocketpath.domain.repository.AuthRepository
 import com.pocketpath.domain.repository.AuthSession
 import com.pocketpath.domain.repository.FailureCode
@@ -45,7 +47,6 @@ class ExpectedPaymentsViewModel @Inject constructor(
     private var sessionScope: CoroutineScope? = null
     private var repository: com.pocketpath.domain.repository.IncomeRepository? = null
     private val cancellationOperations = mutableMapOf<String, String>()
-    private val frozenReceipts = mutableMapOf<String, Pair<com.pocketpath.domain.model.FinancialTransaction, Long>>()
 
     init {
         viewModelScope.launch {
@@ -56,7 +57,6 @@ class ExpectedPaymentsViewModel @Inject constructor(
                 activeUserId = null
                 repository = null
                 cancellationOperations.clear()
-                frozenReceipts.clear()
 
                 if (session !is AuthSession.SignedIn) {
                     _state.value = ExpectedPaymentsSessionState.signedOut()
@@ -74,30 +74,39 @@ class ExpectedPaymentsViewModel @Inject constructor(
                         val foundation = foundationFactory.current()
                         check(repository.userId == uid && foundation.userId == uid)
                         this@ExpectedPaymentsViewModel.repository = repository
+                        var paymentObservation: Observation<List<ExpectedPayment>> = Observation.Loading
+                        var ledgerObservation: Observation<CompleteLedger> = Observation.Loading
+                        fun updatePresentation() {
+                            if (epoch != generation || activeUserId != uid) return
+                            val mapped = ExpectedPaymentsSessionState.mapIfCurrent(
+                                activeUserId = activeUserId,
+                                expectedUserId = uid,
+                                observation = paymentObservation,
+                                ledger = ledgerObservation,
+                                start = LocalDate.MIN,
+                                endInclusive = LocalDate.MAX,
+                            ) ?: return
+                            _state.value = ExpectedPaymentsSessionState.preserveTransientState(mapped, _state.value)
+                        }
                         launch {
                             foundation.observeAccounts().collect { observation ->
                                 if (epoch != generation || activeUserId != uid) return@collect
-                                val accounts = (observation as? Observation.Data)?.value ?: emptyList()
-                                _state.update { it.copy(accounts = accounts) }
+                                _state.update { current ->
+                                    ExpectedPaymentsSessionState.withAccounts(current, observation)
+                                }
+                            }
+                        }
+                        launch {
+                            foundation.observeEffectiveLedger().collect { observation ->
+                                if (epoch != generation || activeUserId != uid) return@collect
+                                ledgerObservation = observation
+                                updatePresentation()
                             }
                         }
                         repository.observeExpectedPayments().collect { observation ->
                             if (epoch != generation) return@collect
-                            ExpectedPaymentsSessionState.mapIfCurrent(
-                                activeUserId = activeUserId,
-                                expectedUserId = uid,
-                                observation = observation,
-                                start = LocalDate.MIN,
-                                endInclusive = LocalDate.MAX,
-                            )?.let { mapped ->
-                                val current = _state.value
-                                _state.value = mapped.copy(
-                                    cancellingPaymentId = current.cancellingPaymentId,
-                                    cancellationError = current.cancellationError,
-                                    hasUnresolvedCancellationRetry = current.hasUnresolvedCancellationRetry,
-                                    cancellationMessage = current.cancellationMessage,
-                                )
-                            }
+                            paymentObservation = observation
+                            updatePresentation()
                         }
                     }
                 } catch (cancelled: CancellationException) {
@@ -121,36 +130,61 @@ class ExpectedPaymentsViewModel @Inject constructor(
     fun recordReceipt(expectedUserId: String, payment: ExpectedPayment, accountId: String?, amount: String) {
         if (expectedUserId != activeUserId || expectedUserId != _state.value.userId ||
             _state.value.payments.none { it.id == payment.id && it.metadata.revision == payment.metadata.revision }
+            || !_state.value.canRecordReceipts
         ) return
         val repo = repository ?: return
         val scope = sessionScope ?: return
-        val frozen = frozenReceipts[payment.id] ?: try {
+        val receipt = try {
             ExpectedPaymentReceiptFactory.create(
-                UUID.randomUUID().toString(), payment, accountId, amount, _state.value.accounts,
+                StableIds.expectedPaymentReceipt(payment.id, payment.metadata.revision),
+                payment,
+                accountId,
+                amount,
+                _state.value.accounts,
                 Instant.now(), java.time.ZoneId.of("Asia/Colombo"),
-            ) to payment.metadata.revision
+            )
         } catch (error: Exception) {
-            _state.update { it.copy(cancellationError = RepositoryFailure(FailureCode.VALIDATION, error.message ?: "Invalid receipt.")) }
+            _state.update { it.copy(receiptError = RepositoryFailure(FailureCode.VALIDATION, error.message ?: "Invalid receipt.")) }
             return
         }
-        frozenReceipts[payment.id] = frozen
         val epoch = generation
-        _state.update { it.copy(cancellingPaymentId = payment.id, cancellationError = null, cancellationMessage = null) }
+        _state.update {
+            it.copy(
+                recordingReceiptPaymentId = payment.id,
+                receiptError = null,
+                receiptMessage = null,
+            )
+        }
         scope.launch {
             try {
-                when (val result = repo.recordExpectedPaymentReceipt(frozen.first, frozen.second)) {
+                when (val result = repo.recordExpectedPaymentReceipt(receipt, payment.metadata.revision)) {
                     is com.pocketpath.domain.repository.CommandResult.Accepted -> if (epoch == generation && activeUserId == expectedUserId) {
-                        frozenReceipts.remove(payment.id)
-                        _state.update { it.copy(cancellingPaymentId = null, cancellationMessage = if (result.replayed) "Receipt was already recorded." else "Receipt recorded.") }
+                        _state.update {
+                            it.copy(
+                                recordingReceiptPaymentId = null,
+                                hasUnresolvedReceiptRetry = false,
+                                receiptMessage = if (result.replayed) "Receipt was already recorded." else "Receipt recorded.",
+                            )
+                        }
                     }
                     is com.pocketpath.domain.repository.CommandResult.Rejected -> if (epoch == generation && activeUserId == expectedUserId) {
                         val uncertain = result.failure.code == FailureCode.NETWORK || result.failure.code == FailureCode.REJECTED
-                        if (!uncertain) frozenReceipts.remove(payment.id)
-                        _state.update { it.copy(cancellingPaymentId = null, cancellationError = result.failure, hasUnresolvedCancellationRetry = uncertain) }
+                        _state.update {
+                            it.copy(
+                                recordingReceiptPaymentId = null,
+                                receiptError = result.failure,
+                                hasUnresolvedReceiptRetry = uncertain,
+                            )
+                        }
                     }
                 }
             } catch (cancelled: CancellationException) { throw cancelled }
         }
+    }
+
+    fun selectReceivingAccount(expectedUserId: String, accountId: String?) {
+        if (expectedUserId != activeUserId || expectedUserId != _state.value.userId) return
+        _state.update { ExpectedPaymentsSessionState.selectReceivingAccount(it, accountId) }
     }
 
     fun cancel(expectedUserId: String, payment: ExpectedPayment) {

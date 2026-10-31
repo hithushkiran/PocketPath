@@ -33,7 +33,13 @@ import com.pocketpath.domain.money.FiatCurrency
 
 /** Expected-payment planning surface. Cancellation never posts a ledger event or account movement. */
 @Composable
-fun ExpectedPaymentsScreen(state: ExpectedPaymentsUiState, onCreate: () -> Unit, onCancel: (ExpectedPayment) -> Unit, onRecordReceipt: (ExpectedPayment, String?, String) -> Unit = { _, _, _ -> }) {
+fun ExpectedPaymentsScreen(
+    state: ExpectedPaymentsUiState,
+    onCreate: () -> Unit,
+    onCancel: (ExpectedPayment) -> Unit,
+    onRecordReceipt: (ExpectedPayment, String?, String) -> Unit = { _, _, _ -> },
+    onSelectReceivingAccount: (String?) -> Unit = {},
+) {
     var cancelling by remember { mutableStateOf<ExpectedPayment?>(null) }
     var receiving by remember { mutableStateOf<ExpectedPayment?>(null) }
     Column(
@@ -61,13 +67,23 @@ fun ExpectedPaymentsScreen(state: ExpectedPaymentsUiState, onCreate: () -> Unit,
         }
         state.cancellationError?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
         state.cancellationMessage?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+        state.receiptError?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
+        state.receiptMessage?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
+        state.ledgerError?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
 
         if (state.isEmpty) {
             Text("No active expected payments.")
         }
 
         state.payments.forEach { payment ->
-            ExpectedPaymentCard(payment, state.cancellingPaymentId == payment.id, { cancelling = payment }) { receiving = payment }
+            ExpectedPaymentCard(
+                payment = payment,
+                cancelling = state.cancellingPaymentId == payment.id,
+                recordingReceipt = state.recordingReceiptPaymentId == payment.id,
+                canRecordReceipt = state.canRecordReceipts,
+                onCancel = { cancelling = payment },
+                onReceipt = { receiving = payment },
+            )
         }
     }
     cancelling?.let { payment ->
@@ -83,11 +99,33 @@ fun ExpectedPaymentsScreen(state: ExpectedPaymentsUiState, onCreate: () -> Unit,
             },
         )
     }
-    receiving?.let { payment -> ReceiptDialog(payment, state.accounts, state.cancellingPaymentId == payment.id, onDismiss = { receiving = null }) { account, amount -> receiving = null; onRecordReceipt(payment, account, amount) } }
+    receiving?.let { payment ->
+        ReceiptDialog(
+            payment = payment,
+            accounts = state.accounts,
+            selectedAccountId = state.selectedReceivingAccountId,
+            accountsLoading = state.accountsLoading,
+            accountsError = state.accountsError,
+            busy = state.recordingReceiptPaymentId == payment.id,
+            onSelectAccount = onSelectReceivingAccount,
+            onDismiss = { receiving = null },
+            onSave = { account, amount ->
+                receiving = null
+                onRecordReceipt(payment, account, amount)
+            },
+        )
+    }
 }
 
 @Composable
-private fun ExpectedPaymentCard(payment: ExpectedPayment, cancelling: Boolean, onCancel: () -> Unit, onReceipt: () -> Unit) {
+private fun ExpectedPaymentCard(
+    payment: ExpectedPayment,
+    cancelling: Boolean,
+    recordingReceipt: Boolean,
+    canRecordReceipt: Boolean,
+    onCancel: () -> Unit,
+    onReceipt: () -> Unit,
+) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
             modifier = Modifier.padding(16.dp),
@@ -110,27 +148,76 @@ private fun ExpectedPaymentCard(payment: ExpectedPayment, cancelling: Boolean, o
                 enabled = !cancelling,
                 modifier = Modifier.fillMaxWidth(),
             ) { Text(if (cancelling) "Cancelling…" else "Cancel expected payment") }
-            OutlinedButton(onClick = onReceipt, enabled = !cancelling && payment.amountDue.money.minor > payment.receivedAmountMinor, modifier = Modifier.fillMaxWidth()) { Text("Record receipt") }
+            OutlinedButton(
+                onClick = onReceipt,
+                enabled = canRecordReceipt && !cancelling && !recordingReceipt &&
+                    payment.state == com.pocketpath.domain.model.ExpectedPaymentState.ACTIVE &&
+                    payment.amountDue.money.minor > payment.receivedAmountMinor,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (recordingReceipt) "Saving receipt…" else "Record receipt") }
         }
     }
 }
 
-@Composable private fun ReceiptDialog(payment: ExpectedPayment, accounts: List<Account>, busy: Boolean, onDismiss: () -> Unit, onSave: (String?, String) -> Unit) {
-    var account by remember { mutableStateOf(accounts.firstOrNull { it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null }?.id) }
-    var amount by remember { mutableStateOf("") }
-    AlertDialog(onDismissRequest = { if (!busy) onDismiss() }, title = { Text("Record receipt") }, text = {
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Remaining ${expectedPaymentAmountText(payment.copy(receivedAmountMinor = payment.amountDue.money.minor - payment.receivedAmountMinor))}")
-            accounts.filter { it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null }.forEach { item ->
-                OutlinedButton(onClick = { account = item.id }, enabled = !busy) { Text(if (account == item.id) "Receiving: ${item.name}" else item.name) }
+@Composable
+private fun ReceiptDialog(
+    payment: ExpectedPayment,
+    accounts: List<Account>,
+    selectedAccountId: String?,
+    accountsLoading: Boolean,
+    accountsError: com.pocketpath.domain.repository.RepositoryFailure?,
+    busy: Boolean,
+    onSelectAccount: (String?) -> Unit,
+    onDismiss: () -> Unit,
+    onSave: (String?, String) -> Unit,
+) {
+    var amount by remember(payment.id) { mutableStateOf("") }
+    val receivingAccounts = accounts.filter(::isActiveLkrAccount)
+    val selectedAccountIsValid = receivingAccounts.any { it.id == selectedAccountId }
+    AlertDialog(
+        onDismissRequest = { if (!busy) onDismiss() },
+        title = { Text("Record receipt") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Remaining LKR ${Money.lkr(payment.amountDue.money.minor - payment.receivedAmountMinor).major().toPlainString()}")
+                if (accountsLoading) {
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    Text("Loading receiving accounts…")
+                }
+                accountsError?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
+                receivingAccounts.forEach { item ->
+                    OutlinedButton(
+                        onClick = { onSelectAccount(item.id) },
+                        enabled = !busy,
+                    ) { Text(if (selectedAccountId == item.id) "Receiving: ${item.name}" else item.name) }
+                }
+                if (!accountsLoading && accountsError == null && receivingAccounts.isEmpty()) {
+                    Text("No active LKR receiving accounts. Create an account first.")
+                }
+                OutlinedTextField(
+                    value = amount,
+                    onValueChange = { amount = it },
+                    enabled = !busy,
+                    label = { Text("LKR receipt amount") },
+                )
             }
-            OutlinedTextField(value = amount, onValueChange = { amount = it }, enabled = !busy, label = { Text("LKR receipt amount") })
-        }
-    }, confirmButton = { TextButton(onClick = { onSave(account, amount) }, enabled = !busy) { Text(if (busy) "Saving…" else "Save receipt") } }, dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } })
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onSave(selectedAccountId, amount) },
+                enabled = !busy && selectedAccountIsValid && !accountsLoading && accountsError == null,
+            ) { Text(if (busy) "Saving…" else "Save receipt") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
+    )
 }
 
 internal fun expectedPaymentStatusText(payment: ExpectedPayment): String = when (payment.state) {
-    com.pocketpath.domain.model.ExpectedPaymentState.ACTIVE -> "Active"
+    com.pocketpath.domain.model.ExpectedPaymentState.ACTIVE -> when {
+        payment.receivedAmountMinor == payment.amountDue.money.minor -> "Paid"
+        payment.receivedAmountMinor > 0L -> "Partially received"
+        else -> "Active"
+    }
     com.pocketpath.domain.model.ExpectedPaymentState.CANCELLED -> "Cancelled"
 }
 

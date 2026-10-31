@@ -5,6 +5,7 @@ import com.pocketpath.domain.model.ExpectedPaymentState
 import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.FiatCurrency
 import com.pocketpath.domain.money.Money
+import com.pocketpath.domain.repository.CompleteLedger
 import com.pocketpath.domain.repository.DataOrigin
 import com.pocketpath.domain.repository.FailureCode
 import com.pocketpath.domain.repository.Observation
@@ -25,6 +26,7 @@ class ExpectedPaymentsStateMapperTest {
         origin = DataOrigin.SERVER,
         observedAt = Instant.parse("2026-10-01T00:00:00Z"),
     )
+    private val emptyLedger = Observation.Data(CompleteLedger(emptyList()), metadata)
 
     private fun payment(
         id: String,
@@ -43,8 +45,8 @@ class ExpectedPaymentsStateMapperTest {
     )
 
     @Test fun loadingAndEmptyObservationsMapToDistinctStates() {
-        val loading = ExpectedPaymentsStateMapper.map(Observation.Loading, start, end)
-        val empty = ExpectedPaymentsStateMapper.map(Observation.Data(emptyList(), metadata), start, end)
+        val loading = ExpectedPaymentsStateMapper.map(Observation.Loading, emptyLedger, start, end)
+        val empty = ExpectedPaymentsStateMapper.map(Observation.Data(emptyList(), metadata), emptyLedger, start, end)
 
         assertTrue(loading.loading)
         assertFalse(loading.isEmpty)
@@ -66,12 +68,13 @@ class ExpectedPaymentsStateMapperTest {
                 ),
                 metadata,
             ),
+            emptyLedger,
             start,
             end,
         )
 
         assertEquals(listOf("same-a", "same-b", "late"), state.payments.map(ExpectedPayment::id))
-        assertEquals(Money.lkr(1_100L), state.totalsByCurrency.getValue(FiatCurrency.LKR))
+        assertEquals(Money.lkr(2_100L), state.totalsByCurrency.getValue(FiatCurrency.LKR))
         assertEquals(Money(FiatCurrency.USD, 500L), state.totalsByCurrency.getValue(FiatCurrency.USD))
         assertTrue(state.isPopulated)
         assertNull(state.error)
@@ -84,7 +87,7 @@ class ExpectedPaymentsStateMapperTest {
         )
         val failure = RepositoryFailure(FailureCode.NETWORK, "Network unavailable")
 
-        val state = ExpectedPaymentsStateMapper.map(Observation.Failed(failure, last), start, end)
+        val state = ExpectedPaymentsStateMapper.map(Observation.Failed(failure, last), emptyLedger, start, end)
 
         assertEquals(failure, state.error)
         assertEquals(listOf("in-window"), state.payments.map(ExpectedPayment::id))
@@ -96,6 +99,7 @@ class ExpectedPaymentsStateMapperTest {
 
         val state = ExpectedPaymentsStateMapper.map(
             Observation.Data(listOf(duplicate, duplicate), metadata),
+            emptyLedger,
             start,
             end,
         )
