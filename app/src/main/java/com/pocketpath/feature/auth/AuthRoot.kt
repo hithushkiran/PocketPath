@@ -2,6 +2,12 @@ package com.pocketpath.feature.auth
 
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.feature.finance.FinanceViewModel
+import com.pocketpath.feature.income.ManualIncomeUiState
+import com.pocketpath.feature.income.ManualIncomeViewModel
+import com.pocketpath.feature.income.ExpectedPaymentsUiState
+import com.pocketpath.feature.income.ExpectedPaymentsViewModel
+import com.pocketpath.feature.income.ExpectedPaymentCreationUiState
+import com.pocketpath.feature.income.ExpectedPaymentCreationViewModel
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -27,6 +33,9 @@ import com.pocketpath.navigation.PocketPathApp
 fun AuthRoot(
     viewModel: AuthViewModel,
     financeViewModel: FinanceViewModel,
+    incomeViewModel: ManualIncomeViewModel,
+    expectedPaymentsViewModel: ExpectedPaymentsViewModel,
+    expectedPaymentCreationViewModel: ExpectedPaymentCreationViewModel,
 ) {
     val session by viewModel.session.collectAsStateWithLifecycle()
     val action by viewModel.actionState.collectAsStateWithLifecycle()
@@ -55,6 +64,9 @@ fun AuthRoot(
 
         is AuthSession.SignedIn -> {
             val financeState by financeViewModel.state.collectAsStateWithLifecycle()
+            val incomeState by incomeViewModel.state.collectAsStateWithLifecycle()
+            val expectedPaymentsState by expectedPaymentsViewModel.state.collectAsStateWithLifecycle()
+            val expectedPaymentCreationState by expectedPaymentCreationViewModel.state.collectAsStateWithLifecycle()
 
             // Never render a previous user's state while session observers catch up.
             val visibleFinance = if (financeState.userId == current.user.uid) {
@@ -62,6 +74,13 @@ fun AuthRoot(
             } else {
                 FinanceUiState(userId = current.user.uid)
             }
+            val visibleIncome = if (incomeState.userId == current.user.uid) {
+                incomeState
+            } else {
+                ManualIncomeUiState(userId = current.user.uid)
+            }
+            val visibleExpectedPayments = if (expectedPaymentsState.userId == current.user.uid) expectedPaymentsState else ExpectedPaymentsUiState(userId = current.user.uid)
+            val visibleExpectedPaymentCreation = if (expectedPaymentCreationState.userId == current.user.uid) expectedPaymentCreationState else ExpectedPaymentCreationUiState(userId = current.user.uid, loading = false)
 
             key(current.user.uid) {
                 var confirmSignOut by remember { mutableStateOf(false) }
@@ -74,7 +93,10 @@ fun AuthRoot(
                         ?.let { stringResource(it) }
                         ?: visibleFinance.localError,
                     onSignOut = {
-                        if (visibleFinance.hasUnresolvedLocalWork) {
+                        if (visibleFinance.hasUnresolvedLocalWork || visibleIncome.hasUnresolvedIncomeWork ||
+                            visibleIncome.hasUnresolvedSourceWork ||
+                            visibleExpectedPayments.hasUnresolvedCancellationRetry
+                        ) {
                             confirmSignOut = true
                         } else {
                             financeViewModel.flushAndSignOut(
@@ -87,6 +109,17 @@ fun AuthRoot(
                     onFinanceEvent = {
                         financeViewModel.onEvent(current.user.uid, it)
                     },
+                    incomeState = visibleIncome,
+                    onIncomeEvent = { incomeViewModel.onEvent(current.user.uid, it) },
+                    expectedPaymentsState = visibleExpectedPayments,
+                    onExpectedPaymentCancel = {
+                        expectedPaymentsViewModel.cancel(current.user.uid, it)
+                    },
+                    onExpectedPaymentReceipt = { payment, accountId, amount ->
+                        expectedPaymentsViewModel.recordReceipt(current.user.uid, payment, accountId, amount)
+                    },
+                    expectedPaymentCreationState = visibleExpectedPaymentCreation,
+                    onExpectedPaymentCreationEvent = { expectedPaymentCreationViewModel.onEvent(current.user.uid, it) },
                 )
 
                 if (confirmSignOut) {
@@ -94,11 +127,38 @@ fun AuthRoot(
                         onDismissRequest = { confirmSignOut = false },
                         title = { Text("Sign out with local work?") },
                         text = {
-                            Text(
-                                "Drafts and unresolved saves will remain on this device " +
-                                    "for this account. You may need to sign back in to " +
-                                    "finish synchronization.",
-                            )
+                            Text(buildString {
+                                if (visibleFinance.hasUnresolvedLocalWork) {
+                                    append(
+                                        "Drafts and unresolved saves will remain on this device " +
+                                            "for this account. You may need to sign back in to " +
+                                            "finish synchronization.",
+                                    )
+                                }
+                                if (visibleIncome.hasUnresolvedIncomeWork) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append(
+                                        "An uncertain income retry exists only in memory. " +
+                                            "Signing out will discard its retry information, and " +
+                                            "the income transaction may already have been recorded.",
+                                    )
+                                }
+                                if (visibleIncome.hasUnresolvedSourceWork) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append(
+                                        "An uncertain income-source retry exists only in memory. " +
+                                            "Signing out will discard its retry information, and " +
+                                        "the source may already have been created.",
+                                    )
+                                }
+                                if (visibleExpectedPayments.hasUnresolvedCancellationRetry) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append(
+                                        "An uncertain expected-payment cancellation retry exists only in memory. " +
+                                            "Signing out will discard its retry information, and the payment may already be cancelled.",
+                                    )
+                                }
+                            })
                         },
                         confirmButton = {
                             TextButton(

@@ -32,6 +32,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.stringResource
@@ -48,6 +49,16 @@ import com.pocketpath.feature.accounts.AccountsScreen
 import com.pocketpath.feature.activity.ActivityScreen
 import com.pocketpath.feature.goals.GoalsScreen
 import com.pocketpath.feature.home.HomeScreen
+import com.pocketpath.feature.income.ManualIncomeEvent
+import com.pocketpath.feature.income.ManualIncomeScreen
+import com.pocketpath.feature.income.ManualIncomeUiState
+import com.pocketpath.feature.income.IncomeSourcesScreen
+import com.pocketpath.feature.income.ExpectedPaymentsScreen
+import com.pocketpath.feature.income.ExpectedPaymentsUiState
+import com.pocketpath.feature.income.ExpectedPaymentCreationScreen
+import com.pocketpath.feature.income.ExpectedPaymentCreationUiState
+import com.pocketpath.feature.income.ExpectedPaymentCreationEvent
+import com.pocketpath.domain.model.ExpectedPayment
 import com.pocketpath.feature.plan.PlanScreen
 import com.pocketpath.feature.settings.SettingsScreen
 import com.pocketpath.feature.transaction.AddScreen
@@ -79,6 +90,13 @@ fun PocketPathApp(
     onSignOut: () -> Unit = {},
     financeState: FinanceUiState = FinanceUiState(),
     onFinanceEvent: (FinanceEvent) -> Unit = {},
+    incomeState: ManualIncomeUiState = ManualIncomeUiState(),
+    onIncomeEvent: (ManualIncomeEvent) -> Unit = {},
+    expectedPaymentsState: ExpectedPaymentsUiState = ExpectedPaymentsUiState(),
+    onExpectedPaymentCancel: (ExpectedPayment) -> Unit = {},
+    onExpectedPaymentReceipt: (ExpectedPayment, String?, String) -> Unit = { _, _, _ -> },
+    expectedPaymentCreationState: ExpectedPaymentCreationUiState = ExpectedPaymentCreationUiState(loading = false),
+    onExpectedPaymentCreationEvent: (ExpectedPaymentCreationEvent) -> Unit = {},
 ) {
     val navController = rememberNavController()
     val entry by navController.currentBackStackEntryAsState()
@@ -89,6 +107,10 @@ fun PocketPathApp(
     val title = when {
         destination.matches(Add::class) -> R.string.nav_add
         destination.matches(Accounts::class) -> R.string.nav_accounts
+        destination.matches(RecordIncome::class) -> R.string.nav_record_income
+        destination.matches(IncomeSources::class) -> R.string.nav_income_sources
+        destination.matches(ExpectedPayments::class) -> R.string.nav_expected_payments
+        destination.matches(CreateExpectedPayment::class) -> R.string.nav_create_expected_payment
         destination.matches(Settings::class) -> R.string.nav_settings
         else -> selectedTab?.label ?: R.string.nav_home
     }
@@ -210,6 +232,35 @@ fun PocketPathApp(
                 AccountsScreen(
                     state = financeState,
                     onEvent = onFinanceEvent,
+                    onRecordIncome = { navController.navigate(RecordIncome) { launchSingleTop = true } },
+                    onManageIncomeSources = { navController.navigate(IncomeSources) { launchSingleTop = true } },
+                    onExpectedPayments = { navController.navigate(ExpectedPayments) { launchSingleTop = true } },
+                )
+            }
+            composable<RecordIncome> {
+                ManualIncomeScreen(state = incomeState, onEvent = onIncomeEvent)
+            }
+            composable<IncomeSources> {
+                IncomeSourcesScreen(state = incomeState, onEvent = onIncomeEvent)
+            }
+            composable<ExpectedPayments> {
+                ExpectedPaymentsScreen(
+                    state = expectedPaymentsState,
+                    onCreate = { navController.navigate(CreateExpectedPayment) { launchSingleTop = true } },
+                    onCancel = onExpectedPaymentCancel,
+                    onRecordReceipt = onExpectedPaymentReceipt,
+                )
+            }
+            composable<CreateExpectedPayment> {
+                LaunchedEffect(expectedPaymentCreationState.saved) {
+                    if (expectedPaymentCreationState.saved) {
+                        onExpectedPaymentCreationEvent(ExpectedPaymentCreationEvent.CreateAnother)
+                        navController.popBackStack()
+                    }
+                }
+                ExpectedPaymentCreationScreen(
+                    state = expectedPaymentCreationState,
+                    onEvent = onExpectedPaymentCreationEvent,
                 )
             }
             composable<Settings> {

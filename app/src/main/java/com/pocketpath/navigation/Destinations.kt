@@ -8,4 +8,8 @@ import kotlinx.serialization.Serializable
 @Serializable data object Goals
 @Serializable data object Add
 @Serializable data object Accounts
+@Serializable data object RecordIncome
+@Serializable data object IncomeSources
+@Serializable data object ExpectedPayments
+@Serializable data object CreateExpectedPayment
 @Serializable data object Settings

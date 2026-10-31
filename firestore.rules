@@ -144,6 +144,65 @@ service cloud.firestore {
         && data.revision == 0;
     }
 
+    function incomeSourcePath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/incomeSources/$(id);
+    }
+
+    function validIncomeSource(data) {
+      return fields(
+          data,
+          ['name', 'kind', 'createdAt', 'updatedAt', 'revision'],
+          ['defaultAccountId', 'defaultCurrencyCode']
+        )
+        && nonBlank(data.name)
+        && data.kind in ['SALARY', 'FREELANCE', 'ADSENSE', 'CRYPTO', 'OTHER']
+        && (
+          !('defaultAccountId' in data)
+          || validId(data.defaultAccountId)
+        )
+        && (
+          !('defaultCurrencyCode' in data)
+          || data.defaultCurrencyCode == 'LKR'
+        )
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.revision is int
+        && data.revision == 0;
+    }
+
+    function validExpectedPayment(uid, data) {
+      let source = incomeSourcePath(uid, data.incomeSourceId);
+      return fields(
+          data,
+          [
+            'incomeSourceId', 'projectLabel', 'currencyCode', 'amountDueMinor', 'dueDate',
+            'state', 'receivedAmountMinor', 'createdAt', 'updatedAt', 'revision'
+          ],
+          ['milestoneLabel', 'clientLabel', 'notes']
+        )
+        && validId(data.incomeSourceId)
+        && nonBlank(data.projectLabel)
+        && data.currencyCode == 'LKR'
+        && data.amountDueMinor is int
+        && data.amountDueMinor > 0
+        && data.amountDueMinor <= 100000000000
+        && data.receivedAmountMinor is int
+        && data.receivedAmountMinor == 0
+        && validDate(data.dueDate)
+        && data.state == 'ACTIVE'
+        && (!('milestoneLabel' in data) || nonBlank(data.milestoneLabel))
+        && (!('clientLabel' in data) || nonBlank(data.clientLabel))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 1000))
+        && data.createdAt == request.time
+        && data.updatedAt == request.time
+        && data.revision is int
+        && data.revision == 0
+        && exists(source)
+        && get(source).data.get('archivedAt', null) == null
+        && (!('defaultCurrencyCode' in get(source).data)
+          || get(source).data.defaultCurrencyCode == 'LKR');
+    }
+
     function validMovement(movement) {
       return fields(
           movement,
@@ -168,11 +227,11 @@ service cloud.firestore {
             'accountIds', 'categoryIds', 'goalIds', 'incomeSourceIds',
             'movements', 'components', 'reservationEffects', 'valuations'
           ],
-          ['note', 'merchantLabel']
+          ['note', 'merchantLabel', 'expectedPaymentId']
         )
         && validId(id)
         && data.operationId == id
-        && data.kind in ['OPENING', 'EXPENSE']
+        && data.kind in ['OPENING', 'EXPENSE', 'INCOME']
         && data.status == 'POSTED'
         && data.occurredAt is timestamp
         && validDate(data.occurredLocalDate)
@@ -190,7 +249,6 @@ service cloud.firestore {
         && data.components is list
         && data.categoryIds is list
         && data.goalIds == []
-        && data.incomeSourceIds == []
         && data.reservationEffects == []
         && data.valuations == []
         && (
@@ -230,6 +288,7 @@ service cloud.firestore {
 
       return data.components == []
         && data.categoryIds == []
+        && data.incomeSourceIds == []
         && !exists(account)
         && afterAccount.openingTransactionId == id
         && afterAccount.openedOn == data.occurredLocalDate
@@ -260,6 +319,7 @@ service cloud.firestore {
           'COMMITTED', 'DISCRETIONARY', 'UNPLANNED_ESSENTIAL'
         ]
         && data.categoryIds == [component.categoryId]
+        && data.incomeSourceIds == []
         && movement.amountMinor == -component.amountLkrMinor
         && exists(account)
         && get(account).data.currencyCode == 'LKR'
@@ -268,6 +328,98 @@ service cloud.firestore {
         && get(account).data.get('archivedAt', null) == null
         && exists(category)
         && get(category).data.get('archivedAt', null) == null;
+    }
+
+    function validIncome(uid, data) {
+      let movement = data.movements[0];
+      let component = data.components[0];
+      let account = accountPath(uid, movement.accountId);
+      let source = incomeSourcePath(uid, component.incomeSourceId);
+      return data.components.size() == 1
+        && fields(component, ['nature', 'amountLkrMinor', 'incomeSourceId'], [])
+        && component.nature == 'EARNING'
+        && component.amountLkrMinor is int
+        && component.amountLkrMinor > 0
+        && component.amountLkrMinor <= 100000000000
+        && validId(component.incomeSourceId)
+        && data.categoryIds == []
+        && data.incomeSourceIds == [component.incomeSourceId]
+        && !('merchantLabel' in data)
+        && movement.amountMinor == component.amountLkrMinor
+        && exists(account)
+        && get(account).data.currencyCode == 'LKR'
+        && get(account).data.assetClass == 'FIAT'
+        && get(account).data.scale == 2
+        && get(account).data.get('archivedAt', null) == null
+        && exists(source)
+        && get(source).data.get('archivedAt', null) == null
+        && (!('defaultCurrencyCode' in get(source).data) || get(source).data.defaultCurrencyCode == 'LKR');
+    }
+
+    function validIncomeExpectedLink(uid, transactionId, data) {
+      return !('expectedPaymentId' in data)
+        || (
+          validId(data.expectedPaymentId)
+          && expectedPaymentLinkExists(uid, transactionId, data)
+        );
+    }
+
+    function expectedPaymentLinkExists(uid, transactionId, data) {
+      let payment = /databases/$(database)/documents/users/$(uid)/expectedPayments/$(data.expectedPaymentId);
+      return exists(payment)
+        && validExpectedPaymentLinkUpdate(uid, transactionId, data, payment);
+    }
+
+    function validExpectedPaymentLinkUpdate(uid, transactionId, data, payment) {
+      let beforePayment = get(payment).data;
+      let afterPayment = getAfter(payment).data;
+      return beforePayment.state == 'ACTIVE'
+        && afterPayment.state == 'ACTIVE'
+        && beforePayment.incomeSourceId == data.components[0].incomeSourceId
+        && afterPayment.incomeSourceId == beforePayment.incomeSourceId
+        && beforePayment.currencyCode == data.movements[0].currencyCode
+        && beforePayment.amountDueMinor is int
+        && beforePayment.get('receivedAmountMinor', 0) is int
+        && afterPayment.receivedAmountMinor is int
+        && afterPayment.receivedAmountMinor == beforePayment.get('receivedAmountMinor', 0) + data.movements[0].amountMinor
+        && afterPayment.receivedAmountMinor <= beforePayment.amountDueMinor
+        && afterPayment.lastReceiptOperationId == transactionId
+        && afterPayment.revision == beforePayment.revision + 1
+        && afterPayment.updatedAt == request.time
+        && !exists(eventPath(uid, transactionId));
+    }
+
+    function validExpectedReceiptUpdate(uid, paymentId) {
+      return 'lastReceiptOperationId' in request.resource.data
+        && validId(request.resource.data.lastReceiptOperationId)
+        && validExpectedReceiptUpdateForId(
+          uid, paymentId, request.resource.data.lastReceiptOperationId
+        );
+    }
+
+    function validExpectedReceiptUpdateForId(uid, paymentId, receiptId) {
+      let receiptPath = eventPath(uid, receiptId);
+      let receipt = getAfter(receiptPath).data;
+      return resource.data.state == 'ACTIVE'
+        && request.resource.data.state == 'ACTIVE'
+        && request.resource.data.revision == resource.data.revision + 1
+        && request.resource.data.updatedAt == request.time
+        && resource.data.get('receivedAmountMinor', 0) is int
+        && request.resource.data.receivedAmountMinor is int
+        && !exists(receiptPath)
+        && receipt.operationId == receiptId
+        && receipt.kind == 'INCOME'
+        && receipt.expectedPaymentId == paymentId
+        && validEvent(receiptId, receipt)
+        && validIncome(uid, receipt)
+        && receipt.incomeSourceIds == [resource.data.incomeSourceId]
+        && receipt.movements.size() == 1
+        && receipt.movements[0].currencyCode == resource.data.currencyCode
+        && request.resource.data.receivedAmountMinor == resource.data.get('receivedAmountMinor', 0) + receipt.movements[0].amountMinor
+        && request.resource.data.receivedAmountMinor <= resource.data.amountDueMinor
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'receivedAmountMinor', 'lastReceiptOperationId', 'updatedAt', 'revision'
+        ]);
     }
 
     match /users/{uid} {
@@ -288,6 +440,40 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
+      match /incomeSources/{sourceId} {
+        allow get, list: if isOwner(uid);
+
+        allow create: if isOwner(uid)
+          && validId(sourceId)
+          && validIncomeSource(request.resource.data);
+
+        allow update, delete: if false;
+      }
+
+      match /expectedPayments/{paymentId} {
+        allow get, list: if isOwner(uid);
+
+        allow create: if isOwner(uid)
+          && validId(paymentId)
+          && validExpectedPayment(uid, request.resource.data);
+
+        allow update: if isOwner(uid) && (
+          validExpectedReceiptUpdate(uid, paymentId)
+          || (
+            resource.data.state == 'ACTIVE'
+            && request.resource.data.state == 'CANCELLED'
+            && request.resource.data.revision == resource.data.revision + 1
+            && request.resource.data.cancelledAt == request.time
+            && request.resource.data.updatedAt == request.time
+            && validId(request.resource.data.cancellationOperationId)
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'state', 'cancelledAt', 'updatedAt', 'revision', 'cancellationOperationId'
+            ])
+          )
+        );
+        allow delete: if false;
+      }
+
       match /accounts/{accountId} {
         allow create: if isOwner(uid)
           && validNewAccount(uid, accountId, request.resource.data);
@@ -306,6 +492,11 @@ service cloud.firestore {
             || (
               request.resource.data.kind == 'EXPENSE'
               && validExpense(uid, request.resource.data)
+            )
+            || (
+              request.resource.data.kind == 'INCOME'
+              && validIncome(uid, request.resource.data)
+              && validIncomeExpectedLink(uid, transactionId, request.resource.data)
             )
           );
 

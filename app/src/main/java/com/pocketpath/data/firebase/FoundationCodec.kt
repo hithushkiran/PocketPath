@@ -37,6 +37,138 @@ internal object FoundationCodec {
         "schemaVersion", "createdAt", "updatedAt",
     )
 
+    private val incomeSourceRequired = setOf(
+        "name", "kind", "createdAt", "updatedAt", "revision",
+    )
+
+    private val expectedPaymentRequired = setOf(
+        "incomeSourceId", "projectLabel", "currencyCode", "amountDueMinor", "dueDate",
+        "state", "receivedAmountMinor", "createdAt", "updatedAt", "revision",
+    )
+
+    fun incomeSourceData(source: IncomeSource): Map<String, Any> {
+        checkId(source.id)
+        require(source.metadata == RecordMetadata()) {
+            "New income sources cannot supply server metadata"
+        }
+        require(source.defaultCurrency == null || source.defaultCurrency == FiatCurrency.LKR) {
+            "Income sources are LKR-only in the first increment"
+        }
+        source.defaultAccountId?.let(::checkId)
+
+        return buildMap {
+            put("name", source.name)
+            put("kind", source.kind.name)
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+            put("revision", 0L)
+            source.defaultAccountId?.let { put("defaultAccountId", it) }
+            source.defaultCurrency?.let { put("defaultCurrencyCode", it.code) }
+        }
+    }
+
+    fun incomeSource(
+        id: String,
+        data: FirestoreFields,
+        pending: Boolean = false,
+    ): IncomeSource {
+        checkId(id)
+        data.checkKeys(
+            incomeSourceRequired,
+            setOf("defaultAccountId", "defaultCurrencyCode", "archivedAt"),
+        )
+
+        val currency = data.optionalText("defaultCurrencyCode")?.let { FiatCurrency(it) }
+        require(currency == null || currency == FiatCurrency.LKR) {
+            "Income sources are LKR-only in the first increment"
+        }
+
+        return IncomeSource(
+            id = id,
+            name = data.text("name"),
+            kind = IncomeSourceKind.valueOf(data.text("kind")),
+            defaultAccountId = data.optionalText("defaultAccountId")?.also(::checkId),
+            defaultCurrency = currency,
+            metadata = RecordMetadata(
+                createdAt = if (pending && data["createdAt"] == null) null else data.instant("createdAt"),
+                updatedAt = if (pending && data["updatedAt"] == null) null else data.instant("updatedAt"),
+                revision = data.integer("revision"),
+                archivedAt = data.optionalInstant("archivedAt"),
+            ),
+        )
+    }
+
+    /**
+     * Canonical expected-payment mapping from the shared P01 contract.
+     *
+     * This is deliberately a codec boundary only. Firestore Rules do not yet authorize
+     * expected-payment creation, so callers must not treat encoding as persistence support.
+     */
+    fun expectedPaymentData(payment: ExpectedPayment): Map<String, Any> {
+        checkId(payment.id)
+        checkId(payment.incomeSourceId)
+        require(payment.metadata == RecordMetadata()) {
+            "New expected payments cannot supply server metadata"
+        }
+        require(payment.amountDue.money.currency in setOf(FiatCurrency.LKR, FiatCurrency.USD)) {
+            "Expected-payment persistence currently supports only LKR and USD"
+        }
+        require(payment.receivedAmountMinor == 0L && payment.lastReceiptOperationId == null) {
+            "New expected payments cannot contain receipt allocation state"
+        }
+
+        return buildMap {
+            put("incomeSourceId", payment.incomeSourceId)
+            put("projectLabel", payment.projectLabel)
+            put("currencyCode", payment.amountDue.money.currency.code)
+            put("amountDueMinor", payment.amountDue.money.minor)
+            put("dueDate", payment.dueDate.toString())
+            put("state", payment.state.name)
+            put("createdAt", FieldValue.serverTimestamp())
+            put("updatedAt", FieldValue.serverTimestamp())
+            put("revision", 0L)
+            put("receivedAmountMinor", 0L)
+            payment.milestoneLabel?.let { put("milestoneLabel", it) }
+            payment.clientLabel?.let { put("clientLabel", it) }
+            payment.cancelledAt?.let { put("cancelledAt", timestamp(it)) }
+            payment.notes?.let { put("notes", it) }
+        }
+    }
+
+    fun expectedPayment(
+        id: String,
+        data: FirestoreFields,
+        pending: Boolean = false,
+    ): ExpectedPayment {
+        checkId(id)
+        data.checkKeys(
+            expectedPaymentRequired,
+            setOf("milestoneLabel", "clientLabel", "cancelledAt", "notes", "archivedAt", "cancellationOperationId", "lastReceiptOperationId"),
+        )
+
+        return ExpectedPayment(
+            id = id,
+            incomeSourceId = data.text("incomeSourceId").also(::checkId),
+            projectLabel = data.text("projectLabel"),
+            amountDue = EntryAmount(Money(expectedPaymentCurrency(data.text("currencyCode")), data.integer("amountDueMinor"))),
+            dueDate = LocalDate.parse(data.text("dueDate")),
+            milestoneLabel = data.optionalText("milestoneLabel"),
+            clientLabel = data.optionalText("clientLabel"),
+            state = ExpectedPaymentState.valueOf(data.text("state")),
+            cancelledAt = data.optionalInstant("cancelledAt"),
+            notes = data.optionalText("notes"),
+            cancellationOperationId = data.optionalText("cancellationOperationId")?.also(::checkId),
+            receivedAmountMinor = data.integer("receivedAmountMinor"),
+            lastReceiptOperationId = data.optionalText("lastReceiptOperationId")?.also(::checkId),
+            metadata = RecordMetadata(
+                createdAt = if (pending && data["createdAt"] == null) null else data.instant("createdAt"),
+                updatedAt = if (pending && data["updatedAt"] == null) null else data.instant("updatedAt"),
+                revision = data.integer("revision"),
+                archivedAt = data.optionalInstant("archivedAt"),
+            ),
+        )
+    }
+
     fun categoryData(category: Category): Map<String, Any> {
         checkId(category.id)
         require(category.metadata == RecordMetadata())
@@ -200,11 +332,11 @@ internal object FoundationCodec {
 
     fun eventData(event: FinancialTransaction): Map<String, Any> {
         checkId(event.id)
-        require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE))
+        require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME))
         require(event.status == TransactionStatus.POSTED && event.revision == 0L)
         require(event.movements.size == 1)
         require(event.reservationEffects.isEmpty() && event.valuations.isEmpty())
-        require(event.occurrenceId == null && event.expectedPaymentId == null)
+        require(event.occurrenceId == null)
         require(event.originalTransactionId == null && event.goalPlanId == null)
         require(event.replacesTransactionId == null && event.cryptoTrade == null)
         require(event.merchantLabel == null || event.merchantLabel.length <= 1000)
@@ -215,21 +347,29 @@ internal object FoundationCodec {
             ?: error("Only fiat movements are supported by this adapter")
         require(amount.money.currency == FiatCurrency.LKR)
 
-        val componentData = event.components.map { component ->
-            require(component.nature == ComponentNature.SPENDING)
-            require(component.originalAmount == null && component.valuationRate == null)
-            require(component.rateSnapshotId == null && component.incomeSourceId == null)
-
-            val amountLkr = component.lkrAmount as? KnownLkrAmount.Known
-                ?: error("Ordinary spending must have a known amount")
-            val categoryId = requireNotNull(component.categoryId).also(::checkId)
-
-            mapOf(
-                "nature" to component.nature.name,
-                "amountLkrMinor" to amountLkr.amount.minor,
-                "categoryId" to categoryId,
-                "commitmentClass" to requireNotNull(component.commitmentClass).name,
-            )
+        val componentData = when (event.kind) {
+            TransactionKind.INCOME -> {
+                require(event.components.size == 1 && amount.money.minor > 0)
+                require(event.merchantLabel == null)
+                val component = event.components.single()
+                require(component.nature == ComponentNature.EARNING)
+                require(component.categoryId == null && component.commitmentClass == null)
+                require(component.originalAmount == null && component.valuationRate == null && component.rateSnapshotId == null)
+                val sourceId = requireNotNull(component.incomeSourceId).also(::checkId)
+                val amountLkr = component.lkrAmount as? KnownLkrAmount.Known
+                    ?: error("Manual income must have a known LKR amount")
+                require(amountLkr.amount == amount.money)
+                listOf(mapOf("nature" to component.nature.name, "amountLkrMinor" to amountLkr.amount.minor, "incomeSourceId" to sourceId))
+            }
+            else -> event.components.map { component ->
+                require(component.nature == ComponentNature.SPENDING)
+                require(component.originalAmount == null && component.valuationRate == null)
+                require(component.rateSnapshotId == null && component.incomeSourceId == null)
+                val amountLkr = component.lkrAmount as? KnownLkrAmount.Known
+                    ?: error("Ordinary spending must have a known amount")
+                val categoryId = requireNotNull(component.categoryId).also(::checkId)
+                mapOf("nature" to component.nature.name, "amountLkrMinor" to amountLkr.amount.minor, "categoryId" to categoryId, "commitmentClass" to requireNotNull(component.commitmentClass).name)
+            }
         }
 
         return buildMap {
@@ -261,6 +401,7 @@ internal object FoundationCodec {
             put("components", componentData)
             put("reservationEffects", emptyList<Any>())
             put("valuations", emptyList<Any>())
+            event.expectedPaymentId?.let { put("expectedPaymentId", it) }
             event.note?.let { put("note", it) }
             event.merchantLabel?.let { put("merchantLabel", it) }
         }
@@ -272,14 +413,14 @@ internal object FoundationCodec {
         pending: Boolean = false,
     ): FinancialTransaction {
         checkId(id)
-        data.checkKeys(eventRequired, setOf("note", "merchantLabel"))
+        data.checkKeys(eventRequired, setOf("note", "merchantLabel", "expectedPaymentId"))
         require(data.text("operationId") == id)
         require(data.integer("schemaVersion") == 1L)
         require(data.integer("revision") == 0L)
         require(data.text("status") == "POSTED")
 
         val kind = TransactionKind.valueOf(data.text("kind"))
-        require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE)) {
+        require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME)) {
             "Unsupported transaction kind: $kind"
         }
         require(data.list("reservationEffects").isEmpty())
@@ -299,21 +440,16 @@ internal object FoundationCodec {
         }
 
         val components = data.maps("components").map { component ->
-            component.checkKeys(
-                setOf("nature", "amountLkrMinor", "categoryId", "commitmentClass"),
-            )
-            require(component.text("nature") == "SPENDING")
-
-            ReportComponent(
-                nature = ComponentNature.SPENDING,
-                lkrAmount = KnownLkrAmount.Known(
-                    Money.lkr(component.integer("amountLkrMinor")),
-                ),
-                categoryId = component.text("categoryId").also(::checkId),
-                commitmentClass = CommitmentClass.valueOf(
-                    component.text("commitmentClass"),
-                ),
-            )
+            val amountLkr = KnownLkrAmount.Known(Money.lkr(component.integer("amountLkrMinor")))
+            if (kind == TransactionKind.INCOME) {
+                component.checkKeys(setOf("nature", "amountLkrMinor", "incomeSourceId"))
+                require(component.text("nature") == "EARNING")
+                ReportComponent(ComponentNature.EARNING, amountLkr, incomeSourceId = component.text("incomeSourceId").also(::checkId))
+            } else {
+                component.checkKeys(setOf("nature", "amountLkrMinor", "categoryId", "commitmentClass"))
+                require(component.text("nature") == "SPENDING")
+                ReportComponent(ComponentNature.SPENDING, amountLkr, categoryId = component.text("categoryId").also(::checkId), commitmentClass = CommitmentClass.valueOf(component.text("commitmentClass")))
+            }
         }
 
         val result = FinancialTransaction(
@@ -328,6 +464,7 @@ internal object FoundationCodec {
             clientCreatedAt = data.instant("clientCreatedAt"),
             movements = movements,
             components = components,
+            expectedPaymentId = data.optionalText("expectedPaymentId")?.also(::checkId),
             note = data.optionalText("note"),
             merchantLabel = data.optionalText("merchantLabel"),
             createdAt = if (pending && data["createdAt"] == null) {
@@ -338,6 +475,13 @@ internal object FoundationCodec {
         )
 
         require(result.movements.size == 1)
+        if (kind == TransactionKind.INCOME) {
+            val movement = result.movements.single().amount as NativeAmount.Fiat
+            val component = result.components.single()
+            require(movement.money.currency == FiatCurrency.LKR && movement.money.minor > 0)
+            require(component.nature == ComponentNature.EARNING && (component.lkrAmount as KnownLkrAmount.Known).amount == movement.money)
+            require(result.merchantLabel == null)
+        }
         require(result.merchantLabel == null || result.merchantLabel.length <= 1000)
         require(result.accountIds == data.strings("accountIds"))
         require(result.categoryIds == data.strings("categoryIds"))
@@ -354,6 +498,35 @@ internal object FoundationCodec {
     fun sameEvent(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys { it != "createdAt" } ==
             expected.filterKeys { it != "createdAt" }
+
+    fun sameIncomeSource(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
+            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
+
+    fun sameExpectedPayment(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
+            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
+
+    fun sameExpectedPaymentReceipt(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys {
+            it !in setOf(
+                "createdAt", "occurredAt", "occurredLocalDate",
+                "recordedTimeZone", "clientCreatedAt",
+            )
+        } == expected.filterKeys {
+            it !in setOf(
+                "createdAt", "occurredAt", "occurredLocalDate",
+                "recordedTimeZone", "clientCreatedAt",
+            )
+        }
+
+    private fun expectedPaymentCurrency(code: String): FiatCurrency {
+        val currency = FiatCurrency(code)
+        require(currency in setOf(FiatCurrency.LKR, FiatCurrency.USD)) {
+            "Expected-payment persistence currently supports only LKR and USD"
+        }
+        return currency
+    }
 
     private fun FirestoreFields.checkKeys(
         required: Set<String>,
@@ -377,6 +550,13 @@ internal object FoundationCodec {
     }
 
     private fun FirestoreFields.integer(name: String): Long {
+        val value = this[name]
+        require(value is Long) { "Expected an integer field: $name" }
+        return value
+    }
+
+    private fun FirestoreFields.optionalInteger(name: String): Long? {
+        if (name !in this) return null
         val value = this[name]
         require(value is Long) { "Expected an integer field: $name" }
         return value

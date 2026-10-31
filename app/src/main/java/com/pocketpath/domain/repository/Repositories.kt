@@ -69,6 +69,8 @@ interface IncomeRepository : UserOwnedRepository {
     fun observeExpectedPayments(): Flow<Observation<List<ExpectedPayment>>>
     suspend fun saveSource(operationId: String, source: IncomeSource): CommandResult<IncomeSource>
     suspend fun saveExpectedPayment(operationId: String, payment: ExpectedPayment): CommandResult<ExpectedPayment>
+    suspend fun cancelExpectedPayment(operationId: String, paymentId: String, expectedRevision: Long): CommandResult<ExpectedPayment>
+    suspend fun recordExpectedPaymentReceipt(event: FinancialTransaction, expectedRevision: Long): CommandResult<FinancialTransaction>
     suspend fun recordIncome(event: FinancialTransaction): CommandResult<FinancialTransaction>
 }
 interface ScheduleRepository : UserOwnedRepository {
