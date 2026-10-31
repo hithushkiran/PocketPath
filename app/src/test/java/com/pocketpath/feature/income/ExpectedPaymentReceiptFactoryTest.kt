@@ -3,6 +3,7 @@ package com.pocketpath.feature.income
 import com.pocketpath.domain.model.ExpectedPayment
 import com.pocketpath.domain.model.Account
 import com.pocketpath.domain.model.AccountType
+import com.pocketpath.domain.model.StableIds
 import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.FiatCurrency
 import com.pocketpath.domain.money.Money
@@ -22,7 +23,8 @@ class ExpectedPaymentReceiptFactoryTest {
         }
     }
     @Test fun buildsExactLinkedIncomeEventWithinRemainingAmount() {
-        val event = ExpectedPaymentReceiptFactory.create("receipt", payment, account.id, "75.00", listOf(account), Instant.EPOCH, ZoneId.of("Asia/Colombo"))
+        val opId = StableIds.expectedPaymentReceipt(payment.id, payment.metadata.revision)
+        val event = ExpectedPaymentReceiptFactory.create(opId, payment, account.id, "75.00", listOf(account), Instant.EPOCH, ZoneId.of("Asia/Colombo"))
         assertEquals("payment", event.expectedPaymentId)
         assertEquals(7_500L, (event.movements.single().amount as com.pocketpath.domain.money.NativeAmount.Fiat).money.minor)
         assertEquals("source", event.components.single().incomeSourceId)

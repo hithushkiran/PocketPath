@@ -5,6 +5,8 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 
 /** Server audit times may remain unresolved while a command is pending. */
 data class RecordMetadata(
@@ -156,6 +158,20 @@ object StableIds {
     fun occurrence(scheduleId: String, nominalDate: LocalDate) = "${checked(scheduleId)}_$nominalDate"
     // SRS worked example: salary_monthly_2026-10-25 -> receipt_salary_monthly_2026-10-25.
     fun scheduledReceipt(occurrenceId: String) = "receipt_${checked(occurrenceId)}"
+    fun expectedPaymentReceipt(paymentId: String, expectedRevision: Long): String {
+        require(expectedRevision >= 0)
+        val identity = "${checked(paymentId).length}:${checked(paymentId)}:$expectedRevision"
+        val bytes = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(StandardCharsets.UTF_8))
+        val digits = "0123456789abcdef"
+        val hash = buildString(bytes.size * 2) {
+            bytes.forEach { byte ->
+                val value = byte.toInt() and 0xff
+                append(digits[value ushr 4])
+                append(digits[value and 0x0f])
+            }
+        }
+        return "expected-receipt_$hash"
+    }
     fun goalPlan(goalId: String, periodStart: LocalDate) = "${checked(goalId)}_$periodStart"
 }
 
