@@ -43,7 +43,7 @@ internal object FoundationCodec {
 
     private val expectedPaymentRequired = setOf(
         "incomeSourceId", "projectLabel", "currencyCode", "amountDueMinor", "dueDate",
-        "state", "createdAt", "updatedAt", "revision",
+        "state", "receivedAmountMinor", "createdAt", "updatedAt", "revision",
     )
 
     fun incomeSourceData(source: IncomeSource): Map<String, Any> {
@@ -143,7 +143,7 @@ internal object FoundationCodec {
         checkId(id)
         data.checkKeys(
             expectedPaymentRequired,
-            setOf("milestoneLabel", "clientLabel", "cancelledAt", "notes", "archivedAt", "cancellationOperationId", "receivedAmountMinor", "lastReceiptOperationId"),
+            setOf("milestoneLabel", "clientLabel", "cancelledAt", "notes", "archivedAt", "cancellationOperationId", "lastReceiptOperationId"),
         )
 
         return ExpectedPayment(
@@ -158,7 +158,7 @@ internal object FoundationCodec {
             cancelledAt = data.optionalInstant("cancelledAt"),
             notes = data.optionalText("notes"),
             cancellationOperationId = data.optionalText("cancellationOperationId")?.also(::checkId),
-            receivedAmountMinor = (data["receivedAmountMinor"] as? Number)?.toLong() ?: 0L,
+            receivedAmountMinor = data.integer("receivedAmountMinor"),
             lastReceiptOperationId = data.optionalText("lastReceiptOperationId")?.also(::checkId),
             metadata = RecordMetadata(
                 createdAt = if (pending && data["createdAt"] == null) null else data.instant("createdAt"),
@@ -507,6 +507,19 @@ internal object FoundationCodec {
         actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
             expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
 
+    fun sameExpectedPaymentReceipt(actual: FirestoreFields, expected: FirestoreFields): Boolean =
+        actual.filterKeys {
+            it !in setOf(
+                "createdAt", "occurredAt", "occurredLocalDate",
+                "recordedTimeZone", "clientCreatedAt",
+            )
+        } == expected.filterKeys {
+            it !in setOf(
+                "createdAt", "occurredAt", "occurredLocalDate",
+                "recordedTimeZone", "clientCreatedAt",
+            )
+        }
+
     private fun expectedPaymentCurrency(code: String): FiatCurrency {
         val currency = FiatCurrency(code)
         require(currency in setOf(FiatCurrency.LKR, FiatCurrency.USD)) {
@@ -537,6 +550,13 @@ internal object FoundationCodec {
     }
 
     private fun FirestoreFields.integer(name: String): Long {
+        val value = this[name]
+        require(value is Long) { "Expected an integer field: $name" }
+        return value
+    }
+
+    private fun FirestoreFields.optionalInteger(name: String): Long? {
+        if (name !in this) return null
         val value = this[name]
         require(value is Long) { "Expected an integer field: $name" }
         return value

@@ -195,6 +195,7 @@ class FoundationCodecTest {
         )), decoded)
         assertEquals("USD", stored["currencyCode"])
         assertEquals(125_001L, stored["amountDueMinor"])
+        assertEquals(0L, stored["receivedAmountMinor"])
         assertTrue(FoundationCodec.sameExpectedPayment(
             stored,
             stored + mapOf(
@@ -233,6 +234,14 @@ class FoundationCodecTest {
         }
         assertThrows(IllegalArgumentException::class.java) {
             FoundationCodec.expectedPayment(payment.id, stored + ("amountDueMinor" to 0L))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.expectedPayment(payment.id, stored - "receivedAmountMinor")
+        }
+        listOf<Any?>(1.0, 1, "1", null, -1L).forEach { counter ->
+            assertThrows(IllegalArgumentException::class.java) {
+                FoundationCodec.expectedPayment(payment.id, stored + ("receivedAmountMinor" to counter))
+            }
         }
         assertThrows(IllegalArgumentException::class.java) {
             FoundationCodec.expectedPaymentData(payment.copy(
