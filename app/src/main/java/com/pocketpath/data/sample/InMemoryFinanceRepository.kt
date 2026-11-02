@@ -252,18 +252,50 @@ class InMemoryFinanceRepository(
 
     override suspend fun activityPage(query: ActivityQuery): Observation<ActivityPage> {
         val snapshot = state.value
-        val cursorParts = query.cursor?.token?.split(':')
-        val offset = if (cursorParts == null) 0 else {
-            if (cursorParts.size != 3 || cursorParts[0].toLongOrNull() != snapshot.revision || cursorParts[1] != (query.accountId ?: "*"))
-                return Observation.Failed(failure(FailureCode.CONFLICT, "Cursor scope/revision changed; restart pagination"))
-            cursorParts[2].toIntOrNull()?.takeIf { it >= 0 }
-                ?: return Observation.Failed(failure(FailureCode.VALIDATION, "Invalid cursor"))
-        }
-        val events = snapshot.events.values.filter {
+        val allEvents = snapshot.events.values.filter {
             query.accountId == null || query.accountId in it.accountIds
         }.sortedWith(compareByDescending<FinancialTransaction> { it.financialTime.occurredAt }.thenByDescending { it.id })
-        val page = events.drop(offset).take(query.pageSize)
-        val next = (offset + page.size).takeIf { it < events.size }?.let { ActivityCursor("${snapshot.revision}:${query.accountId ?: "*"}:$it") }
-        return Observation.Data(ActivityPage(page, next), metadata().copy(completeness = HistoryCompleteness.INCOMPLETE))
+
+        val offset = query.cursor?.let { cursor ->
+            val parts = cursor.token.split(':', limit = 4)
+            if (parts.size < 3) return Observation.Failed(failure(FailureCode.VALIDATION, "Invalid cursor"))
+
+            if (parts.size == 4) {
+                val tokenRevision = parts[0].toLongOrNull()
+                if (tokenRevision != snapshot.revision) {
+                    return Observation.Failed(failure(FailureCode.CONFLICT, "Cursor scope/revision changed; restart pagination"))
+                }
+                val docId = parts[3]
+                val docIndex = allEvents.indexOfFirst { it.id == docId }
+                if (docIndex >= 0) {
+                    docIndex + 1
+                } else {
+                    return Observation.Failed(failure(FailureCode.VALIDATION, "Invalid cursor"))
+                }
+            } else {
+                val tokenRevision = parts[0].toLongOrNull()
+                if (tokenRevision != snapshot.revision) {
+                    return Observation.Failed(failure(FailureCode.CONFLICT, "Cursor scope/revision changed; restart pagination"))
+                }
+                val parsedOffset = parts[2].toIntOrNull()
+                if (parsedOffset != null && parsedOffset in 0..allEvents.size) {
+                    parsedOffset
+                } else {
+                    return Observation.Failed(failure(FailureCode.VALIDATION, "Invalid cursor"))
+                }
+            }
+        } ?: 0
+
+        val page = allEvents.drop(offset).take(query.pageSize)
+        val nextOffset = offset + page.size
+        val nextCursor = if (nextOffset < allEvents.size && page.isNotEmpty()) {
+            val lastEvent = page.last()
+            val instant = lastEvent.financialTime.occurredAt
+            ActivityCursor("${snapshot.revision}:${instant.epochSecond}:${instant.nano}:${lastEvent.id}")
+        } else {
+            null
+        }
+
+        return Observation.Data(ActivityPage(page, nextCursor), metadata().copy(completeness = HistoryCompleteness.INCOMPLETE))
     }
 }

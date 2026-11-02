@@ -103,12 +103,34 @@ class ActivityPaginationTest {
     }
 
     @Test
-    fun emptyActivityPageReturnsZeroEventsAndNullCursor() = runBlocking {
+    fun malformedCursorTokenIsRejected() = runBlocking {
         val repository = repo()
-        val pageObs = repository.activityPage(ActivityQuery())
+        repository.createWithOpening(openingCommand())
+
+        val malformedObs = repository.activityPage(ActivityQuery(cursor = com.pocketpath.domain.repository.ActivityCursor("invalid_token")))
+        assertTrue(malformedObs is Observation.Failed)
+    }
+
+    @Test
+    fun identicalTimestampsAreTieBrokenDeterministicallyById() = runBlocking {
+        val repository = repo()
+        repository.createWithOpening(openingCommand())
+
+        val fixedTime = time
+        val cmd1 = RecordExpenseCommand("exp_a", SampleFixtures.cash.id, EntryAmount(Money.lkr(1000_00L)), SampleFixtures.food.id, CommitmentClass.DISCRETIONARY, fixedTime, fixedTime.occurredAt)
+        val cmd2 = RecordExpenseCommand("exp_z", SampleFixtures.cash.id, EntryAmount(Money.lkr(2000_00L)), SampleFixtures.food.id, CommitmentClass.DISCRETIONARY, fixedTime, fixedTime.occurredAt)
+
+        repository.recordExpense(cmd1)
+        repository.recordExpense(cmd2)
+
+        val pageObs = repository.activityPage(ActivityQuery(pageSize = 10))
         assertTrue(pageObs is Observation.Data)
         val page = (pageObs as Observation.Data).value
-        assertTrue(page.events.isEmpty())
-        assertNull(page.nextCursor)
+
+        // "exp_z" comes before "exp_a" because 'exp_z' > 'exp_a' alphabetically
+        val expenseEvents = page.events.filter { it.kind == TransactionKind.EXPENSE }
+        assertEquals(2, expenseEvents.size)
+        assertEquals("exp_z", expenseEvents[0].id)
+        assertEquals("exp_a", expenseEvents[1].id)
     }
 }

@@ -1,6 +1,8 @@
 package com.pocketpath.data.repository
 
+import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldPath
 import com.google.firebase.firestore.FieldValue
 import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.FirebaseFirestoreException
@@ -609,10 +611,39 @@ class FirebaseFoundationRepository internal constructor(
     ): Observation<ActivityPage> = read {
         query.accountId?.let(FoundationCodec::checkId)
 
+        var baseQuery = transactions
+            .orderBy("occurredAt", Query.Direction.DESCENDING)
+            .orderBy(FieldPath.documentId(), Query.Direction.DESCENDING)
+
+        if (query.accountId != null) {
+            baseQuery = baseQuery.whereArrayContains("accountIds", query.accountId)
+        }
+
+        val pageQuery = query.cursor?.let { cursor ->
+            val parts = cursor.token.split(':', limit = 3)
+            if (parts.size != 3) {
+                throw FoundationProblem(
+                    FailureCode.VALIDATION,
+                    "Invalid Activity cursor format.",
+                )
+            }
+            val seconds = parts[0].toLongOrNull()
+            val nanos = parts[1].toIntOrNull()?.takeIf { it in 0..999_999_999 }
+            val docId = parts[2]
+            if (seconds == null || nanos == null || docId.isBlank()) {
+                throw FoundationProblem(
+                    FailureCode.VALIDATION,
+                    "Invalid Activity cursor values.",
+                )
+            }
+            baseQuery.startAfter(Timestamp(seconds, nanos), docId)
+        } ?: baseQuery
+
         val source = if (preferCachedActivity) Source.CACHE else Source.DEFAULT
-        val snapshot = transactions.get(source).await()
+        val effectivePageSize = query.pageSize.coerceIn(1, 100)
+        val limit = (effectivePageSize + 1).toLong()
+        val snapshot = pageQuery.limit(limit).get(source).await()
         requireSession()
-        checkLimit(snapshot)
 
         val pageMetadata = snapshotMetadata(
             snapshot,
@@ -620,55 +651,28 @@ class FirebaseFoundationRepository internal constructor(
             requireHistory = false,
         )
 
-        val events = decodeLedger(snapshot).events
-            .filter { query.accountId == null || query.accountId in it.accountIds }
-            .sortedWith(
-                compareByDescending<FinancialTransaction> {
-                    it.financialTime.occurredAt
-                }.thenByDescending { it.id },
+        val decodedEvents = snapshot.documents.map { doc ->
+            FoundationCodec.event(
+                id = doc.id,
+                data = requireNotNull(doc.data),
+                pending = doc.metadata.hasPendingWrites(),
             )
-
-        // Cursor belongs to this user, filter and immutable event membership.
-        val identity = buildString {
-            append(userId)
-            append('\n')
-            append(query.accountId.orEmpty())
-            events.forEach {
-                append('\n')
-                append(it.id)
-            }
         }
 
-        val fingerprint = MessageDigest.getInstance("SHA-256")
-            .digest(identity.toByteArray(Charsets.UTF_8))
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+        val hasMore = decodedEvents.size > effectivePageSize
+        val pageEvents = if (hasMore) decodedEvents.take(effectivePageSize) else decodedEvents
 
-        val offset = query.cursor?.let { cursor ->
-            val parts = cursor.token.split(':')
-            if (parts.size != 2 || parts[0] != fingerprint) {
-                throw FoundationProblem(
-                    FailureCode.CONFLICT,
-                    "Activity changed. Restart pagination.",
-                )
-            }
-
-            parts[1].toIntOrNull()?.takeIf { it in 0..events.size }
-                ?: throw FoundationProblem(
-                    FailureCode.VALIDATION,
-                    "Invalid Activity cursor.",
-                )
-        } ?: 0
-
-        val page = events.drop(offset).take(query.pageSize)
-        val nextOffset = offset + page.size
-        val next = if (nextOffset < events.size) {
-            ActivityCursor("$fingerprint:$nextOffset")
+        val nextCursor = if (hasMore && pageEvents.isNotEmpty()) {
+            val lastEvent = pageEvents.last()
+            val instant = lastEvent.financialTime.occurredAt
+            val token = "${instant.epochSecond}:${instant.nano}:${lastEvent.id}"
+            ActivityCursor(token)
         } else {
             null
         }
 
         Observation.Data(
-            value = ActivityPage(page, next),
+            value = ActivityPage(pageEvents, nextCursor),
             metadata = pageMetadata.copy(
                 completeness = HistoryCompleteness.INCOMPLETE,
             ),
