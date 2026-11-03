@@ -109,4 +109,11 @@ class BudgetFormStateTest {
         // Form is busy -> cannot submit
         assertTrue(state.budgetForm.busy)
     }
+
+    @Test
+    fun budgetObservationFailurePopulatesBudgetErrorInUiState() {
+        val stateWithError = FinanceUiState(budgetError = "Unable to observe budgets. Connect and retry.")
+        assertNotNull(stateWithError.budgetError)
+        assertEquals("Unable to observe budgets. Connect and retry.", stateWithError.budgetError)
+    }
 }

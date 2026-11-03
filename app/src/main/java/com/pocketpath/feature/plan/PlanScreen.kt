@@ -64,7 +64,11 @@ fun PlanScreen(
             state.overallWeeklyBudgetProgress != null ||
             state.categoryBudgetProgresses.isNotEmpty()
 
-        if (!hasBudgets) {
+        if (state.budgetError != null) {
+            item {
+                FinanceMessage(state.budgetError)
+            }
+        } else if (!hasBudgets) {
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Column(

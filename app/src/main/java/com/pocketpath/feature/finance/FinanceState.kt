@@ -91,6 +91,7 @@ data class FinanceUiState(
     val activity: List<FinancialTransaction> = emptyList(),
     val activityLoading: Boolean = false,
     val activityError: String? = null,
+    val budgetError: String? = null,
     val nextActivityCursor: ActivityCursor? = null,
     val draftsLoaded: Boolean = false,
     val draftSaving: Boolean = false,

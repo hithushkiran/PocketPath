@@ -65,6 +65,8 @@ class FinanceViewModel @Inject constructor(
                     activityJob?.cancel()
                     pendingAccount = null
                     pendingExpense = null
+                    pendingBudget = null
+                    pendingBudgetOperationId = null
                     drafts = null
                     draftRevision = 0L
                     sessionScope = null
@@ -75,6 +77,8 @@ class FinanceViewModel @Inject constructor(
                     if (session !is AuthSession.SignedIn) {
                         pendingAccount = null
                         pendingExpense = null
+                        pendingBudget = null
+                        pendingBudgetOperationId = null
                         _state.value = FinanceUiState(loading = false)
                         return@collectLatest
                     }
@@ -85,6 +89,8 @@ class FinanceViewModel @Inject constructor(
                     if (previous == null) {
                         pendingAccount = null
                         pendingExpense = null
+                        pendingBudget = null
+                        pendingBudgetOperationId = null
                     }
 
                     _state.value = FinanceUiState(
@@ -170,6 +176,7 @@ class FinanceViewModel @Inject constructor(
                                 val categoryData = categories as? Observation.Data
                                 val budgetData = budgets as? Observation.Data
                                 val ledgerData = ledger as? Observation.Data
+                                val budgetError = (budgets as? Observation.Failed)?.failure?.message
 
                                 val availableAccounts = accountData?.value ?: _state.value.accounts
                                 val availableCategories = categoryData?.value ?: _state.value.categories
@@ -261,6 +268,7 @@ class FinanceViewModel @Inject constructor(
                                         accounts = availableAccounts,
                                         categories = availableCategories,
                                         budgets = availableBudgets,
+                                        budgetError = budgetError,
                                         overallMonthlyBudgetProgress = monthlyProgress,
                                         overallWeeklyBudgetProgress = weeklyProgress,
                                         categoryBudgetProgresses = categoryProgresses,
