@@ -1,5 +1,6 @@
 package com.pocketpath
 
+import com.pocketpath.feature.goals.GoalsViewModel
 import com.pocketpath.feature.finance.FinanceViewModel
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -20,12 +21,14 @@ class MainActivity : ComponentActivity() {
 
         val authViewModel = ViewModelProvider(this)[AuthViewModel::class.java]
         val financeViewModel = ViewModelProvider(this)[FinanceViewModel::class.java]
+        val goalsViewModel = ViewModelProvider(this)[GoalsViewModel::class.java]
 
         setContent {
             PocketPathTheme {
                 AuthRoot(
                     viewModel = authViewModel,
                     financeViewModel = financeViewModel,
+                    goalsViewModel = goalsViewModel,
                 )
             }
         }

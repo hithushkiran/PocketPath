@@ -1,5 +1,7 @@
 package com.pocketpath.feature.auth
 
+import com.pocketpath.feature.goals.GoalsUiState
+import com.pocketpath.feature.goals.GoalsViewModel
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.feature.finance.FinanceViewModel
 import androidx.compose.foundation.layout.Arrangement
@@ -27,6 +29,7 @@ import com.pocketpath.navigation.PocketPathApp
 fun AuthRoot(
     viewModel: AuthViewModel,
     financeViewModel: FinanceViewModel,
+    goalsViewModel: GoalsViewModel,
 ) {
     val session by viewModel.session.collectAsStateWithLifecycle()
     val action by viewModel.actionState.collectAsStateWithLifecycle()
@@ -63,6 +66,13 @@ fun AuthRoot(
                 FinanceUiState(userId = current.user.uid)
             }
 
+            val goalsState by goalsViewModel.state.collectAsStateWithLifecycle()
+            val visibleGoals = if (goalsState.userId == current.user.uid) {
+                goalsState
+            } else {
+                GoalsUiState()
+            }
+
             key(current.user.uid) {
                 var confirmSignOut by remember { mutableStateOf(false) }
 
@@ -83,6 +93,8 @@ fun AuthRoot(
                             )
                         }
                     },
+                    goalsState = visibleGoals,
+                    onGoalsEvent = { goalsViewModel.onEvent(current.user.uid, it) },
                     financeState = visibleFinance,
                     onFinanceEvent = {
                         financeViewModel.onEvent(current.user.uid, it)

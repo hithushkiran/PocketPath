@@ -46,6 +46,8 @@ import androidx.navigation.compose.rememberNavController
 import com.pocketpath.R
 import com.pocketpath.feature.accounts.AccountsScreen
 import com.pocketpath.feature.activity.ActivityScreen
+import com.pocketpath.feature.goals.GoalsEvent
+import com.pocketpath.feature.goals.GoalsUiState
 import com.pocketpath.feature.goals.GoalsScreen
 import com.pocketpath.feature.home.HomeScreen
 import com.pocketpath.feature.plan.PlanScreen
@@ -79,6 +81,8 @@ fun PocketPathApp(
     onSignOut: () -> Unit = {},
     financeState: FinanceUiState = FinanceUiState(),
     onFinanceEvent: (FinanceEvent) -> Unit = {},
+    goalsState: GoalsUiState = GoalsUiState(),
+    onGoalsEvent: (GoalsEvent) -> Unit = {},
 ) {
     val navController = rememberNavController()
     val entry by navController.currentBackStackEntryAsState()
@@ -187,7 +191,7 @@ fun PocketPathApp(
                 )
             }
             composable<Plan> { PlanScreen() }
-            composable<Goals> { GoalsScreen() }
+            composable<Goals> { GoalsScreen(state = goalsState, onEvent = onGoalsEvent) }
             composable<Add> {
                 AddScreen(
                     state = financeState,
