@@ -751,6 +751,7 @@ class FinanceViewModel @Inject constructor(
             is FinanceEvent.EditMonthlyBill -> editMonthlyBill { form ->
                 if (form.busy || form.retryRequired) form
                 else form.copy(
+                    estimate = event.estimate ?: form.estimate,
                     title = event.title ?: form.title,
                     categoryId = event.categoryId ?: form.categoryId,
                     amount = event.amount ?: form.amount,
@@ -791,9 +792,11 @@ class FinanceViewModel @Inject constructor(
                     accountId = event.accountId ?: form.accountId,
                     amount = event.amount ?: form.amount,
                     date = event.date ?: form.date,
+                    actualAmount = event.actualAmount ?: form.actualAmount,
                     error = null,
                 )
             }
+            FinanceEvent.SaveBillActualAmount -> saveBillActualAmount()
             FinanceEvent.SubmitBillPayment -> submitBillPayment()
 
             FinanceEvent.ReloadActivity -> loadActivity(reset = true)
@@ -818,9 +821,13 @@ class FinanceViewModel @Inject constructor(
             return
         }
         if (bills.cached || bills.loading || bills.error != null) return
-        val bill = bills.occurrences.firstOrNull { it.occurrence.id == id && it.remainingMinor > 0 } ?: return
+        val bill = bills.occurrences.firstOrNull { it.occurrence.id == id && (it.remainingMinor > 0 || it.occurrence.amountMode == AmountMode.ESTIMATE) } ?: return
         val account = state.selectableAccounts.firstOrNull() ?: return
-        val form = BillPaymentForm(id, bill.occurrence.titleSnapshot, account.id, "", today())
+        val form = BillPaymentForm(
+            id, bill.occurrence.titleSnapshot, account.id, "", today(),
+            estimate = bill.occurrence.amountMode == AmountMode.ESTIMATE,
+            actualAmount = bill.actualAmount?.money?.major()?.toPlainString().orEmpty(),
+        )
         _state.update { it.copy(monthlyBills = it.monthlyBills.copy(payment = form, showPayment = true)) }
     }
 
@@ -828,6 +835,32 @@ class FinanceViewModel @Inject constructor(
         _state.update { state ->
             val form = state.monthlyBills.payment ?: return@update state
             state.copy(monthlyBills = state.monthlyBills.copy(payment = update(form)))
+        }
+    }
+
+    private fun saveBillActualAmount() {
+        val state = _state.value
+        val form = state.monthlyBills.payment ?: return
+        val uid = state.userId ?: return
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        if (form.busy || form.retryRequired || !form.estimate || !state.monthlyBills.showPayment) return
+        val bill = state.monthlyBills.occurrences.firstOrNull { it.occurrence.id == form.occurrenceId } ?: return
+        val actual = runCatching { EntryAmount(Money.parse(form.actualAmount.trim(), FiatCurrency.LKR)) }.getOrNull()
+        if (actual == null || actual.money.minor < bill.paidMinor) {
+            editBillPayment { it.copy(error = "Enter a positive LKR actual amount with up to two decimal places, at least the amount already paid.") }
+            return
+        }
+        editBillPayment { it.copy(busy = true, error = null) }
+        val epoch = generation
+        scope.launch {
+            val result = repo.setMonthlyBillActualAmount(form.occurrenceId, bill.occurrence.metadata.revision, actual)
+            if (epoch != generation || _state.value.userId != uid) return@launch
+            editBillPayment { it.copy(
+                busy = false,
+                amount = if (result is CommandResult.Accepted) "" else it.amount,
+                error = (result as? CommandResult.Rejected)?.failure?.message,
+            ) }
         }
     }
 
@@ -930,7 +963,7 @@ class FinanceViewModel @Inject constructor(
                 recurrence = Recurrence(Frequency.MONTHLY, date),
                 timeZone = zone,
                 expectedAmount = amount,
-                amountMode = AmountMode.FIXED,
+                amountMode = if (form.estimate) AmountMode.ESTIMATE else AmountMode.FIXED,
                 activeFrom = date,
                 categoryId = category.id,
                 commitmentClass = CommitmentClass.COMMITTED,

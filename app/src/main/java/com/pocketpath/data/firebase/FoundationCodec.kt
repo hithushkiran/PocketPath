@@ -877,7 +877,7 @@ internal object FoundationCodec {
         require(schedule.kind == ScheduleKind.COMMITMENT && schedule.recurrence.frequency == Frequency.MONTHLY)
         require(schedule.activeFrom == date && date.year in 0..9999 && schedule.endDate == null)
         require(schedule.title.isNotBlank() && schedule.title.length <= 80)
-        require(schedule.expectedAmount.money.currency == FiatCurrency.LKR && schedule.amountMode == AmountMode.FIXED)
+        require(schedule.expectedAmount.money.currency == FiatCurrency.LKR)
         require(schedule.timeZone.id == "Asia/Colombo" && schedule.commitmentClass == CommitmentClass.COMMITTED)
         require(schedule.metadata == RecordMetadata() && !schedule.paused)
         require(schedule.preferredAccountId == null && schedule.remindLocalTime == null && schedule.reminderLeadDays == 0)
@@ -899,7 +899,7 @@ internal object FoundationCodec {
             "interval" to 1L,
             "anchorDate" to date.toString(),
             "activeFrom" to date.toString(),
-            "amountMode" to AmountMode.FIXED.name,
+            "amountMode" to schedule.amountMode.name,
             "paused" to false,
             "reminderLeadDays" to 0L,
         )
@@ -910,6 +910,7 @@ internal object FoundationCodec {
             kind = ScheduleKind.COMMITMENT,
             titleSnapshot = schedule.title,
             expectedAmount = schedule.expectedAmount,
+            amountMode = schedule.amountMode,
             timeZone = schedule.timeZone,
             categoryId = categoryId,
             commitmentClass = CommitmentClass.COMMITTED,
@@ -931,11 +932,22 @@ internal object FoundationCodec {
         "createdAt" to FieldValue.serverTimestamp(),
         "updatedAt" to FieldValue.serverTimestamp(),
         "revision" to 0L,
-    )
+    ) + if (bill.amountMode == AmountMode.ESTIMATE) mapOf("amountMode" to bill.amountMode.name) else emptyMap()
+
+    fun monthlyBillActualData(bill: MonthlyBill, actual: EntryAmount): Map<String, Any> {
+        require(bill.occurrence.amountMode == AmountMode.ESTIMATE)
+        require(actual.money.currency == FiatCurrency.LKR && actual.money.minor >= bill.paidMinor)
+        return mapOf(
+            "actualAmountMinor" to actual.money.minor,
+            "updatedAt" to FieldValue.serverTimestamp(),
+            "revision" to Math.addExact(bill.occurrence.metadata.revision, 1L),
+        )
+    }
 
     fun monthlyBill(id: String, data: FirestoreFields): MonthlyBill = MonthlyBill(
         billOccurrence(id, data),
         if ("paidAmountMinor" in data) data.integer("paidAmountMinor") else 0L,
+        data.optionalInteger("actualAmountMinor")?.let { EntryAmount(Money.lkr(it)) },
     )
 
     private fun billOccurrence(id: String, data: FirestoreFields): Occurrence {
@@ -943,7 +955,7 @@ internal object FoundationCodec {
             "scheduleId", "nominalDate", "effectiveDueDate", "kind", "titleSnapshot",
             "expectedAmountMinor", "currencyCode", "timeZone", "categoryId", "commitmentClass",
             "state", "createdAt", "updatedAt", "revision",
-        ), setOf("paidAmountMinor", "lastBillExpenseId"))
+        ), setOf("paidAmountMinor", "lastBillExpenseId", "actualAmountMinor", "amountMode"))
         val scheduleId = data.text("scheduleId").also(::checkId)
         val nominal = LocalDate.parse(data.text("nominalDate"))
         require(id == StableIds.occurrence(scheduleId, nominal))
@@ -953,10 +965,11 @@ internal object FoundationCodec {
         require(data.text("commitmentClass") == CommitmentClass.COMMITTED.name)
         val revision = data.integer("revision")
         if (revision == 0L) {
-            require("paidAmountMinor" !in data && "lastBillExpenseId" !in data)
+            require("paidAmountMinor" !in data && "lastBillExpenseId" !in data && "actualAmountMinor" !in data)
         } else {
-            require(revision > 0 && "paidAmountMinor" in data)
-            checkId(data.text("lastBillExpenseId"))
+            require(revision > 0)
+            if ("paidAmountMinor" in data) checkId(data.text("lastBillExpenseId"))
+            else require("lastBillExpenseId" !in data && "actualAmountMinor" in data)
         }
         val title = data.text("titleSnapshot")
         require(title.isNotBlank() && title.length <= 80)
@@ -966,6 +979,7 @@ internal object FoundationCodec {
             effectiveDueDate = nominal,
             kind = ScheduleKind.COMMITMENT,
             titleSnapshot = title,
+            amountMode = data.optionalText("amountMode")?.let(AmountMode::valueOf) ?: AmountMode.FIXED,
             expectedAmount = EntryAmount(Money.lkr(data.integer("expectedAmountMinor"))),
             timeZone = ZoneId.of(data.text("timeZone")),
             categoryId = data.text("categoryId").also(::checkId),

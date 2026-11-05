@@ -532,7 +532,7 @@ service cloud.firestore {
         && validDate(data.anchorDate) && data.activeFrom == data.anchorDate
         && data.timeZone == 'Asia/Colombo' && data.currencyCode == 'LKR'
         && data.expectedAmountMinor is int && data.expectedAmountMinor > 0
-        && data.expectedAmountMinor <= 100000000000 && data.amountMode == 'FIXED'
+        && data.expectedAmountMinor <= 100000000000 && data.amountMode in ['FIXED', 'ESTIMATE']
         && validId(data.categoryId) && data.commitmentClass == 'COMMITTED'
         && exists(categoryPath(uid, data.categoryId))
         && get(categoryPath(uid, data.categoryId)).data.get('archivedAt', null) == null
@@ -560,7 +560,7 @@ service cloud.firestore {
           'scheduleId', 'nominalDate', 'effectiveDueDate', 'kind', 'titleSnapshot',
           'expectedAmountMinor', 'currencyCode', 'timeZone', 'categoryId', 'commitmentClass',
           'state', 'createdAt', 'updatedAt', 'revision'
-        ], [])
+        ], ['amountMode'])
         && validDate(data.nominalDate)
         && occurrenceId == data.scheduleId + '_' + data.nominalDate
         && data.effectiveDueDate == data.nominalDate
@@ -568,6 +568,7 @@ service cloud.firestore {
           ? !exists(path)
           : exists(path) && data.nominalDate > schedule.anchorDate
             && validRecurringBillDate(data.nominalDate, schedule.anchorDate))
+        && data.get('amountMode', 'FIXED') == schedule.amountMode
         && data.kind == schedule.kind && data.titleSnapshot == schedule.title
         && data.expectedAmountMinor is int && data.expectedAmountMinor == schedule.expectedAmountMinor
         && data.currencyCode == schedule.currencyCode && data.timeZone == schedule.timeZone
@@ -698,7 +699,7 @@ service cloud.firestore {
         && after.revision is int && after.revision == before.revision + 1
         && after.updatedAt == request.time
         && after.paidAmountMinor is int && after.paidAmountMinor >= 0
-        && after.paidAmountMinor <= before.expectedAmountMinor
+        && after.paidAmountMinor <= before.get('actualAmountMinor', before.expectedAmountMinor)
         && after.paidAmountMinor == before.get('paidAmountMinor', 0) + direction * component.amountLkrMinor;
     }
 
@@ -706,6 +707,19 @@ service cloud.firestore {
       let path = billOccurrencePath(uid, expense.occurrenceId);
       return validBillExpenseDelta(expense.occurrenceId, get(path).data, getAfter(path).data,
         expenseId, expense, direction);
+    }
+
+    function validBillActualUpdate() {
+      let before = resource.data;
+      let after = request.resource.data;
+      return before.kind == 'COMMITMENT' && before.state == 'OPEN'
+        && before.get('amountMode', 'FIXED') == 'ESTIMATE'
+        && after.diff(before).affectedKeys().hasOnly(['actualAmountMinor', 'updatedAt', 'revision'])
+        && after.actualAmountMinor is int
+        && after.actualAmountMinor > 0 && after.actualAmountMinor <= 100000000000
+        && after.actualAmountMinor >= before.get('paidAmountMinor', 0)
+        && after.updatedAt == request.time
+        && after.revision is int && after.revision == before.revision + 1;
     }
 
     function validBillPaymentUpdate(uid, occurrenceId) {
@@ -976,7 +990,7 @@ service cloud.firestore {
         allow update: if isOwner(uid)
           && (resource.data.kind == 'INCOME_REMINDER'
             ? validReminderOccurrenceUpdate(uid, occurrenceId, resource.data, request.resource.data)
-            : validBillPaymentUpdate(uid, occurrenceId));
+            : (validBillActualUpdate() || validBillPaymentUpdate(uid, occurrenceId)));
         allow delete: if false;
       }
 

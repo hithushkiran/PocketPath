@@ -86,6 +86,7 @@ data class BudgetForm(
 )
 
 data class MonthlyBillForm(
+    val estimate: Boolean = false,
     val title: String = "",
     val categoryId: String? = null,
     val amount: String = "",
@@ -101,6 +102,8 @@ data class BillPaymentForm(
     val accountId: String,
     val amount: String,
     val date: String,
+    val estimate: Boolean = false,
+    val actualAmount: String = "",
     val busy: Boolean = false,
     val retryRequired: Boolean = false,
     val error: String? = null,
@@ -367,6 +370,7 @@ sealed interface FinanceEvent {
     data object OpenMonthlyBill : FinanceEvent
     data object CloseMonthlyBill : FinanceEvent
     data class EditMonthlyBill(
+        val estimate: Boolean? = null,
         val title: String? = null,
         val categoryId: String? = null,
         val amount: String? = null,
@@ -383,10 +387,12 @@ sealed interface FinanceEvent {
     data class OpenBillPayment(val occurrenceId: String) : FinanceEvent
     data object CloseBillPayment : FinanceEvent
     data class EditBillPayment(
+        val actualAmount: String? = null,
         val accountId: String? = null,
         val amount: String? = null,
         val date: String? = null,
     ) : FinanceEvent
+    data object SaveBillActualAmount : FinanceEvent
     data object SubmitBillPayment : FinanceEvent
 
     data object ReloadActivity : FinanceEvent

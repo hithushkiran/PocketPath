@@ -619,6 +619,24 @@ class FirebaseFoundationRepository internal constructor(
         )
     }
 
+    suspend fun setMonthlyBillActualAmount(
+        occurrenceId: String,
+        expectedRevision: Long,
+        actual: EntryAmount,
+    ): CommandResult<Unit> = command(null) {
+        FoundationCodec.checkId(occurrenceId)
+        val reference = owned.collection(UserCollection.OCCURRENCES).document(occurrenceId)
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val bill = FoundationCodec.monthlyBill(occurrenceId, requireNotNull(transaction.get(reference).data))
+            if (bill.actualAmount == actual) return@runTransaction true
+            if (bill.occurrence.metadata.revision != expectedRevision) throw conflict()
+            transaction.update(reference, FoundationCodec.monthlyBillActualData(bill, actual))
+            false
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
     suspend fun payMonthlyBill(payment: RecordExpenseCommand): CommandResult<Unit> = command(payment.operationId) {
         val occurrenceId = requireNotNull(payment.occurrenceId).also(FoundationCodec::checkId)
         require(payment.amount.money.currency == FiatCurrency.LKR)
@@ -666,7 +684,7 @@ class FirebaseFoundationRepository internal constructor(
     }
 
     private fun billExpenseUpdate(bill: MonthlyBill, expenseId: String, paidMinor: Long): Map<String, Any> {
-        require(paidMinor in 0..bill.occurrence.expectedAmount.money.minor)
+        require(paidMinor in 0..bill.dueMinor)
         return mapOf(
             "paidAmountMinor" to paidMinor,
             "lastBillExpenseId" to expenseId,
