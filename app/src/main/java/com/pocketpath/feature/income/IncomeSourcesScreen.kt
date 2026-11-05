@@ -147,6 +147,7 @@ private fun SourceKindChoices(
         listOf(
             IncomeSourceKind.SALARY to "Salary",
             IncomeSourceKind.FREELANCE to "Freelance",
+            IncomeSourceKind.ADSENSE to "AdSense",
             IncomeSourceKind.OTHER to "Allowance / other",
         ).forEach { (value, label) ->
             FilterChip(
