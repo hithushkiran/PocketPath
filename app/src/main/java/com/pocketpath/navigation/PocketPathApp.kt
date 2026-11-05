@@ -58,7 +58,6 @@ import com.pocketpath.domain.model.Schedule
 import com.pocketpath.feature.income.IncomeRemindersScreen
 import com.pocketpath.feature.income.IncomeRemindersUiState
 import com.pocketpath.feature.income.ManualIncomeEvent
-import com.pocketpath.feature.income.ManualIncomeScreen
 import com.pocketpath.feature.income.ManualIncomeUiState
 import com.pocketpath.feature.income.IncomeSourcesScreen
 import com.pocketpath.feature.income.ExpectedPaymentsScreen
@@ -69,7 +68,7 @@ import com.pocketpath.feature.income.ExpectedPaymentCreationEvent
 import com.pocketpath.domain.model.ExpectedPayment
 import com.pocketpath.feature.plan.PlanScreen
 import com.pocketpath.feature.settings.SettingsScreen
-import com.pocketpath.feature.transaction.AddScreen
+import com.pocketpath.feature.transaction.TransactionEntryScreen
 import com.pocketpath.ui.theme.PocketPathTheme
 import kotlin.reflect.KClass
 
@@ -120,16 +119,37 @@ fun PocketPathApp(
     val selectedTab = tabs.firstOrNull { destination.matches(it.routeClass) }
     val isTopLevel = selectedTab != null || destination == null
     val title = when {
-        destination.matches(Add::class) -> R.string.nav_add
+        destination.matches(Add::class) || destination.matches(RecordIncome::class) -> R.string.nav_add_transaction
         destination.matches(Accounts::class) -> R.string.nav_accounts
         destination.matches(CryptoWallets::class) -> R.string.nav_crypto
-        destination.matches(RecordIncome::class) -> R.string.nav_record_income
         destination.matches(IncomeSources::class) -> R.string.nav_income_sources
         destination.matches(IncomeReminders::class) -> R.string.nav_income_reminders
         destination.matches(ExpectedPayments::class) -> R.string.nav_expected_payments
         destination.matches(CreateExpectedPayment::class) -> R.string.nav_create_expected_payment
         destination.matches(Settings::class) -> R.string.nav_settings
         else -> selectedTab?.label ?: R.string.nav_home
+    }
+
+    val transactionEntry: @Composable (Boolean) -> Unit = { startWithIncome ->
+        TransactionEntryScreen(
+            startWithIncome = startWithIncome,
+            financeState = financeState,
+            onFinanceEvent = onFinanceEvent,
+            incomeState = incomeState,
+            onIncomeEvent = onIncomeEvent,
+            onAccounts = {
+                navController.navigate(Accounts) { launchSingleTop = true }
+            },
+            onActivity = {
+                navController.navigate(Activity) {
+                    popUpTo(navController.graph.findStartDestination().id) {
+                        saveState = true
+                    }
+                    launchSingleTop = true
+                    restoreState = true
+                }
+            },
+        )
     }
 
     Scaffold(
@@ -200,7 +220,7 @@ fun PocketPathApp(
             }
         },
         floatingActionButton = {
-            if (isTopLevel) {
+            if (destination.matches(Activity::class)) {
                 ExtendedFloatingActionButton(
                     onClick = { navController.navigate(Add) { launchSingleTop = true } },
                     icon = { Icon(Icons.Default.Add, contentDescription = null) },
@@ -226,6 +246,16 @@ fun PocketPathApp(
                     onAddExpense = {
                         navController.navigate(Add) { launchSingleTop = true }
                     },
+                    onAddIncome = {
+                        navController.navigate(RecordIncome) { launchSingleTop = true }
+                    },
+                    onGoals = {
+                        navController.navigate(Goals) {
+                            popUpTo(navController.graph.findStartDestination().id) { saveState = true }
+                            launchSingleTop = true
+                            restoreState = true
+                        }
+                    },
                 )
             }
             composable<Activity> {
@@ -243,24 +273,8 @@ fun PocketPathApp(
             composable<Goals> {
                 GoalsScreen(state = goalsState, onEvent = onGoalsEvent, finance = financeState)
             }
-            composable<Add> {
-                AddScreen(
-                    state = financeState,
-                    onEvent = onFinanceEvent,
-                    onAccounts = {
-                        navController.navigate(Accounts) { launchSingleTop = true }
-                    },
-                    onActivity = {
-                        navController.navigate(Activity) {
-                            popUpTo(navController.graph.findStartDestination().id) {
-                                saveState = true
-                            }
-                            launchSingleTop = true
-                            restoreState = true
-                        }
-                    },
-                )
-            }
+            composable<Add> { transactionEntry(false) }
+            composable<RecordIncome> { transactionEntry(true) }
             composable<Accounts> {
                 AccountsScreen(
                     state = financeState,
@@ -273,9 +287,6 @@ fun PocketPathApp(
             }
             composable<CryptoWallets> {
                 CryptoScreen(state = financeState, onEvent = onFinanceEvent)
-            }
-            composable<RecordIncome> {
-                ManualIncomeScreen(state = incomeState, onEvent = onIncomeEvent)
             }
             composable<IncomeReminders> {
                 IncomeRemindersScreen(

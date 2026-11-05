@@ -17,15 +17,16 @@ import com.pocketpath.domain.model.Account
 import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
 import java.math.BigDecimal
+import java.util.Locale
 
 fun lkrText(minor: Long): String =
-    "LKR ${BigDecimal.valueOf(minor, 2).toPlainString()}"
+    "LKR ${groupedAmount(BigDecimal.valueOf(minor, 2))}"
 
 fun balanceText(balance: AccountBalance?): String =
     when (val units = balance?.units) {
         is BalanceUnits.Fiat ->
             "${units.asset.code} ${
-                BigDecimal.valueOf(units.minor, units.asset.scale).toPlainString()
+                groupedAmount(BigDecimal.valueOf(units.minor, units.asset.scale))
             }"
 
         is BalanceUnits.Crypto ->
@@ -35,6 +36,9 @@ fun balanceText(balance: AccountBalance?): String =
 
         null -> "—"
     }
+
+private fun groupedAmount(amount: BigDecimal): String =
+    String.format(Locale.ROOT, "%,.${amount.scale()}f", amount)
 
 @Composable
 fun FinanceMessage(text: String, error: Boolean = true) {
@@ -55,6 +59,7 @@ fun FinanceMessage(text: String, error: Boolean = true) {
 fun FinanceStatus(
     state: FinanceUiState,
     onEvent: (FinanceEvent) -> Unit,
+    showRoutineMessages: Boolean = true,
 ) {
     if (state.loading) {
         LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
@@ -68,13 +73,13 @@ fun FinanceStatus(
         }
     }
 
+    if (state.uncertainSaveIds.isNotEmpty()) {
+        FinanceMessage("A save needs confirmation. Reconnect to check its result.")
+    }
+
     when {
         state.pendingExpenseIds.isNotEmpty() -> {
             Text("${state.pendingExpenseIds.size} expense(s) awaiting synchronization.")
-        }
-
-        state.uncertainSaveIds.isNotEmpty() -> {
-            Text("A save needs confirmation. Reconnect to check its result.")
         }
 
         state.cached -> {
@@ -84,12 +89,12 @@ fun FinanceStatus(
             }
         }
 
-        state.ready -> {
+        state.ready && showRoutineMessages && state.uncertainSaveIds.isEmpty() -> {
             Text("Financial data refreshed from the server.")
         }
     }
 
-    if (state.draftsLoaded) {
+    if (state.draftsLoaded && (showRoutineMessages || state.draftSaving)) {
         Text(
             if (state.draftSaving) {
                 "Saving draft on this device…"
@@ -110,18 +115,20 @@ fun FinanceStatus(
 fun FinanceBody(
     state: FinanceUiState,
     onEvent: (FinanceEvent) -> Unit,
+    modifier: Modifier = Modifier,
+    compact: Boolean = false,
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(24.dp),
+            .padding(if (compact) 16.dp else 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        FinanceStatus(state, onEvent)
+        FinanceStatus(state, onEvent, showRoutineMessages = !compact)
         content()
-        Spacer(Modifier.height(88.dp))
+        if (!compact) Spacer(Modifier.height(88.dp))
     }
 }
 

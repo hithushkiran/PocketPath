@@ -6,15 +6,21 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.pocketpath.domain.calculation.FundsPlanningResult
 import com.pocketpath.domain.calculation.SavedGoalProgress
-import com.pocketpath.feature.goals.SavedGoalPaceDetails
 import com.pocketpath.domain.model.IncomeSource
 import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
+import com.pocketpath.feature.goals.SavedGoalPaceDetails
 import com.pocketpath.ui.components.*
 
 @Composable
@@ -23,84 +29,118 @@ fun HomeScreen(
     onEvent: (FinanceEvent) -> Unit,
     onAccounts: () -> Unit,
     onAddExpense: () -> Unit,
+    onAddIncome: () -> Unit,
+    onGoals: () -> Unit,
     incomeSources: List<IncomeSource> = emptyList(),
     goalProgress: SavedGoalProgress? = null,
 ) {
     val plan = state.homeFunds
-    FinanceBody(state, onEvent) {
-        Text(
-            "Your recorded money",
-            style = MaterialTheme.typography.headlineSmall,
-        )
-
+    val colors = MaterialTheme.colorScheme
+    val type = MaterialTheme.typography
+    FinanceBody(state, onEvent, compact = true) {
         if (state.ready && state.accounts.isEmpty()) {
-            Text("Create a cash account and enter the money you already have.")
-
-            Button(
-                onClick = onAccounts,
+            Card(
+                colors = CardDefaults.cardColors(containerColor = colors.primaryContainer),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Set up an account")
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Add your first account", style = type.headlineSmall)
+                    Text("Enter your current balance to start tracking money.")
+                    Button(onClick = onAccounts) { Text("Set up an account") }
+                }
             }
         } else {
             FundsOverviewCard(state, plan)
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+            Button(onClick = onAddExpense, modifier = Modifier.weight(1f)) {
+                Text("Add expense", textAlign = TextAlign.Center)
+            }
+            FilledTonalButton(onClick = onAddIncome, modifier = Modifier.weight(1f)) {
+                Text("Add income", textAlign = TextAlign.Center)
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
             OutlinedButton(
                 onClick = { onEvent(FinanceEvent.OpenPurchasePreview) },
                 enabled = plan != null && state.selectableAccounts.isNotEmpty() &&
                     state.selectableCategories.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.weight(1f),
             ) {
-                Text("Check a purchase")
+                Text("Check a purchase", textAlign = TextAlign.Center)
             }
-
-            Button(
-                onClick = onAddExpense,
-                enabled = state.ready && state.selectableAccounts.isNotEmpty(),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Record an expense")
-            }
-
-            OutlinedButton(
-                onClick = onAccounts,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Manage accounts")
-            }
-        }
-
-        goalProgress?.let { progress ->
-            Card(modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Savings goal · ${progress.goal.name}", style = MaterialTheme.typography.titleMedium)
-                    Text("Target ${lkrText(progress.goal.target.money.minor)} · Due ${progress.goal.deadline}")
-                    SavedGoalPaceDetails(progress)
-                }
+            OutlinedButton(onClick = onAccounts, modifier = Modifier.weight(1f)) {
+                Text("Accounts", textAlign = TextAlign.Center)
             }
         }
 
         state.homeLedger?.let { summary ->
-            Text("This month through ${summary.date}", style = MaterialTheme.typography.titleMedium)
-            AmountRow("Income received", summary.receivedMinor)
-            if (summary.receivedBySourceMinor.isNotEmpty()) {
-                Text("Received by source", style = MaterialTheme.typography.titleSmall)
-                val labels = incomeSources.associate { it.id to it.name }
-                summary.receivedBySourceMinor.entries
-                    .sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
-                    .forEach { (id, amount) ->
-                        AmountRow(labels[id] ?: "Source unavailable", amount)
+            var showSources by rememberSaveable { mutableStateOf(false) }
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("This month", style = type.titleLarge)
+                    Text("Through ${summary.date}", style = type.bodySmall, color = colors.onSurfaceVariant)
+                    AmountRow("Income received", summary.receivedMinor, colors.secondary)
+                    AmountRow("Net spending", summary.netSpendingMinor, colors.error)
+                    summary.realizedCrypto?.let { realized ->
+                        AmountRow(
+                            "Realized crypto gain/loss",
+                            realized.knownLkrMinor,
+                            when {
+                                realized.knownLkrMinor > 0L -> colors.secondary
+                                realized.knownLkrMinor < 0L -> colors.error
+                                else -> colors.onSurface
+                            },
+                        )
+                        if (!realized.isComplete) Text("Some sale costs are unavailable.", style = type.bodySmall)
                     }
-                Text("Outstanding expected payments are shown separately in Accounts.")
-            }
-            AmountRow("Net spending", summary.netSpendingMinor)
-            summary.realizedCrypto?.let { realized ->
-                AmountRow("Realized crypto gain/loss", realized.knownLkrMinor)
-                if (!realized.isComplete) Text("Some sale costs are unavailable.")
+                    if (summary.receivedBySourceMinor.isNotEmpty()) {
+                        TextButton(onClick = { showSources = !showSources }) {
+                            Text(if (showSources) "Hide income by source" else "Income by source")
+                        }
+                        if (showSources) {
+                            val labels = incomeSources.associate { it.id to it.name }
+                            summary.receivedBySourceMinor.entries
+                                .sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
+                                .forEach { (id, amount) -> AmountRow(labels[id] ?: "Source unavailable", amount) }
+                            Text("See Accounts for outstanding expected payments.", style = type.bodySmall)
+                        }
+                    }
+                }
             }
         }
 
-        state.accounts.forEach { account ->
-            AccountBalanceCard(account, state.balances[account.id])
+        goalProgress?.let { progress ->
+            OutlinedCard(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Savings goal", style = type.labelLarge, color = colors.primary)
+                    Text(progress.goal.name, style = type.titleLarge)
+                    val target = progress.goal.target.money.minor
+                    if (target > 0L) {
+                        val fraction = (progress.confirmedReservedMinor.toDouble() / target).toFloat().coerceIn(0f, 1f)
+                        LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                    }
+                    Text("Target ${lkrText(target)} · Due ${progress.goal.deadline}", style = type.bodyMedium)
+                    SavedGoalPaceDetails(progress)
+                    TextButton(onClick = onGoals) { Text("View goals") }
+                }
+            }
+        }
+
+        if (state.accounts.isNotEmpty()) {
+            var showAccounts by rememberSaveable { mutableStateOf(false) }
+            OutlinedButton(
+                onClick = { showAccounts = !showAccounts },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(if (showAccounts) "Hide account balances" else "Show account balances")
+            }
+            if (showAccounts) {
+                state.accounts.forEach { account ->
+                    AccountBalanceCard(account, state.balances[account.id])
+                }
+            }
         }
     }
 
@@ -109,40 +149,62 @@ fun HomeScreen(
 
 @Composable
 private fun FundsOverviewCard(state: FinanceUiState, plan: FundsPlanningResult.Ready?) {
-    Card(modifier = Modifier.fillMaxWidth()) {
+    var showBreakdown by rememberSaveable { mutableStateOf(false) }
+    val colors = MaterialTheme.colorScheme
+    val type = MaterialTheme.typography
+    Card(
+        colors = CardDefaults.cardColors(containerColor = colors.primaryContainer),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (plan == null) {
-                Text("Everyday account balance", style = MaterialTheme.typography.titleMedium)
-                Text(state.poolBalanceMinor?.let(::lkrText) ?: "—", style = MaterialTheme.typography.headlineMedium)
+                Text("Everyday account balance", style = type.titleMedium)
+                Text(state.poolBalanceMinor?.let(::lkrText) ?: "—", style = type.headlineLarge)
                 if (!state.loading && state.error == null) {
                     val message = state.monthlyBills.error ?: state.monthlyBills.recurrenceError
                     FinanceMessage(message ?: "Available funds will appear when bill and account data are up to date.")
                 }
             } else {
-                Text("Available after goals and bills", style = MaterialTheme.typography.titleMedium)
-                Text(lkrText(plan.availableAfterConfirmedReservationsMinor), style = MaterialTheme.typography.headlineMedium)
-                if (plan.availableAfterConfirmedReservationsMinor < 0L) {
+                val available = plan.availableAfterConfirmedReservationsMinor
+                Text("Available to spend", style = type.titleMedium)
+                Text(lkrText(available), style = type.headlineLarge)
+                Text("After goals and bills through ${plan.input.horizonEnd}", style = type.bodyMedium)
+                if (available < 0L) {
                     FinanceMessage("Recorded funds are short of current commitments and reservations.")
                 }
-                Text("Through ${plan.input.horizonEnd}, including overdue bills.")
-                AmountRow("Everyday LKR account balance", requireNotNull(plan.input.eligibleBalanceMinor))
-                AmountRow("Reserved for goals in these accounts", requireNotNull(plan.input.reservedInEligibleAccountsMinor))
-                AmountRow("Unreserved before bills", plan.unreservedLiquidityMinor)
-                AmountRow("Bills still due", requireNotNull(plan.input.outstandingCommitmentsMinor))
-                Text("Future goal contributions and expected income are excluded.")
+                OutlinedButton(
+                    onClick = { showBreakdown = !showBreakdown },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = colors.onPrimaryContainer),
+                ) {
+                    Text(if (showBreakdown) "Hide breakdown" else "How it’s calculated")
+                }
+                if (showBreakdown) {
+                    HorizontalDivider()
+                    AmountRow("Everyday LKR account balance", requireNotNull(plan.input.eligibleBalanceMinor))
+                    AmountRow("Reserved for goals", requireNotNull(plan.input.reservedInEligibleAccountsMinor))
+                    AmountRow("Unreserved before bills", plan.unreservedLiquidityMinor)
+                    AmountRow("Bills still due", requireNotNull(plan.input.outstandingCommitmentsMinor))
+                    Text("Includes overdue bills. Excludes expected income and future goal contributions.", style = type.bodySmall)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun AmountRow(label: String, amountMinor: Long) {
+private fun AmountRow(label: String, amountMinor: Long, amountColor: Color = Color.Unspecified) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(label, modifier = Modifier.weight(1f))
-        Text(lkrText(amountMinor))
+        Text(label, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+        Text(
+            lkrText(amountMinor),
+            modifier = Modifier.weight(1f),
+            textAlign = TextAlign.End,
+            color = amountColor,
+            style = MaterialTheme.typography.titleSmall,
+        )
     }
 }
 

@@ -4,6 +4,11 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import com.pocketpath.feature.finance.FinanceEvent
@@ -19,102 +24,144 @@ fun AccountsScreen(
     onExpectedPayments: () -> Unit,
     onIncomeReminders: () -> Unit,
 ) {
+    var section by rememberSaveable { mutableStateOf(AccountsSection.BALANCES) }
+    Column(Modifier.fillMaxSize()) {
+        SectionTabs(AccountsSection.entries.map { it.label }, section.ordinal) {
+            section = AccountsSection.entries[it]
+        }
+
+        key(section) {
+            when (section) {
+                AccountsSection.BALANCES -> FinanceBody(state, onEvent, compact = true) {
+                    Text("Your balances", style = MaterialTheme.typography.titleLarge)
+                    if (state.accountForm.locked && !state.accountForm.saved) {
+                        OutlinedButton(onClick = { section = AccountsSection.NEW_ACCOUNT }) {
+                            Text("Review account save")
+                        }
+                    }
+                    if (state.ready && state.accounts.isEmpty()) {
+                        Text("Add a cash account to start tracking your money.")
+                        Button(onClick = { section = AccountsSection.NEW_ACCOUNT }) {
+                            Text("Create an account")
+                        }
+                    }
+                    state.accounts.forEach { account ->
+                        AccountBalanceCard(account, state.balances[account.id])
+                    }
+                }
+                AccountsSection.NEW_ACCOUNT -> NewCashAccount(state, onEvent) {
+                    section = AccountsSection.BALANCES
+                }
+                AccountsSection.INCOME -> FinanceBody(state, onEvent, compact = true) {
+                    Text("Income tools", style = MaterialTheme.typography.titleLarge)
+                    Button(onClick = onRecordIncome, modifier = Modifier.fillMaxWidth()) {
+                        Text("Record income")
+                    }
+                    OutlinedButton(onClick = onManageIncomeSources, modifier = Modifier.fillMaxWidth()) {
+                        Text("Manage income sources")
+                    }
+                    OutlinedButton(onClick = onExpectedPayments, modifier = Modifier.fillMaxWidth()) {
+                        Text("Expected payments")
+                    }
+                    OutlinedButton(onClick = onIncomeReminders, modifier = Modifier.fillMaxWidth()) {
+                        Text("Recurring income")
+                    }
+                }
+            }
+        }
+    }
+}
+
+private enum class AccountsSection(val label: String) {
+    BALANCES("Balances"),
+    NEW_ACCOUNT("New account"),
+    INCOME("Income"),
+}
+
+@Composable
+private fun NewCashAccount(
+    state: FinanceUiState,
+    onEvent: (FinanceEvent) -> Unit,
+    onViewBalances: () -> Unit,
+) {
     val form = state.accountForm
     val editable = state.canEditDraft && !form.busy && !form.locked && !form.saved
 
-    FinanceBody(state, onEvent) {
-        Text("New cash account", style = MaterialTheme.typography.headlineSmall)
-        Text("Opening money increases your balance without counting as income.")
+    Column(Modifier.fillMaxSize()) {
+        FinanceBody(state, onEvent, modifier = Modifier.weight(1f), compact = true) {
+            Text("New cash account", style = MaterialTheme.typography.titleLarge)
+            Text("Enter the money already in this account.", style = MaterialTheme.typography.bodyMedium)
 
-        OutlinedTextField(
-            value = form.name,
-            onValueChange = { onEvent(FinanceEvent.AccountNameChanged(it)) },
-            label = { Text("Account name") },
-            singleLine = true,
-            enabled = editable,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        OutlinedTextField(
-            value = form.opening,
-            onValueChange = { onEvent(FinanceEvent.OpeningAmountChanged(it)) },
-            label = { Text("Opening balance (LKR)") },
-            supportingText = { Text("Use at most two decimal places, without commas.") },
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
-            singleLine = true,
-            enabled = editable,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        OutlinedTextField(
-            value = form.date,
-            onValueChange = { onEvent(FinanceEvent.AccountDateChanged(it)) },
-            label = { Text("Balance as of") },
-            supportingText = { Text("yyyy-MM-dd") },
-            singleLine = true,
-            enabled = editable,
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        if (state.cached) {
-            Text("You can prepare this draft offline. Connect to create the account.")
-        }
-
-        form.error?.let { FinanceMessage(it) }
-
-        if (form.saved) {
-            FinanceMessage("Account created.", error = false)
-
-            OutlinedButton(
-                onClick = { onEvent(FinanceEvent.NewAccount) },
+            OutlinedTextField(
+                value = form.name,
+                onValueChange = { onEvent(FinanceEvent.AccountNameChanged(it)) },
+                label = { Text("Account name") },
+                singleLine = true,
+                enabled = editable,
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Create another account")
-            }
-        } else {
-            if (form.locked && !form.busy) {
-                Text("Save is not confirmed. Retry without changing the entry.")
-            }
+            )
 
-            Button(
-                onClick = { onEvent(FinanceEvent.CreateAccount) },
-                enabled = state.ready && !state.cached && !form.busy,
+            OutlinedTextField(
+                value = form.opening,
+                onValueChange = { onEvent(FinanceEvent.OpeningAmountChanged(it)) },
+                label = { Text("Opening balance (LKR)") },
+                supportingText = { Text("Use at most two decimal places, without commas.") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                enabled = editable,
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    when {
-                        form.busy -> "Saving…"
-                        form.locked -> "Retry save"
-                        else -> "Create cash account"
-                    },
-                )
+            )
+
+            OutlinedTextField(
+                value = form.date,
+                onValueChange = { onEvent(FinanceEvent.AccountDateChanged(it)) },
+                label = { Text("Balance as of") },
+                supportingText = { Text("yyyy-MM-dd") },
+                singleLine = true,
+                enabled = editable,
+                modifier = Modifier.fillMaxWidth(),
+            )
+
+            if (state.cached) {
+                Text("You can prepare this draft offline. Connect to create the account.")
             }
         }
 
-        Text("Your accounts", style = MaterialTheme.typography.titleLarge)
+        FormActions {
+            form.error?.let { FinanceMessage(it) }
 
-        OutlinedButton(onClick = onRecordIncome, modifier = Modifier.fillMaxWidth()) {
-            Text("Record income")
-        }
+            if (form.saved) {
+                FinanceMessage("Account created.", error = false)
 
-        OutlinedButton(onClick = onManageIncomeSources, modifier = Modifier.fillMaxWidth()) {
-            Text("Manage income sources")
-        }
+                Button(onClick = onViewBalances, modifier = Modifier.fillMaxWidth()) {
+                    Text("View balances")
+                }
 
-        OutlinedButton(onClick = onExpectedPayments, modifier = Modifier.fillMaxWidth()) {
-            Text("Expected payments")
-        }
+                TextButton(
+                    onClick = { onEvent(FinanceEvent.NewAccount) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Create another account")
+                }
+            } else {
+                if (form.locked && !form.busy) {
+                    Text("Save is not confirmed. Retry without changing the entry.")
+                }
 
-        OutlinedButton(onClick = onIncomeReminders, modifier = Modifier.fillMaxWidth()) {
-            Text("Recurring income")
-        }
-
-        if (state.ready && state.accounts.isEmpty()) {
-            Text("No accounts yet.")
-        }
-
-        state.accounts.forEach { account ->
-            AccountBalanceCard(account, state.balances[account.id])
+                Button(
+                    onClick = { onEvent(FinanceEvent.CreateAccount) },
+                    enabled = state.ready && !state.cached && !form.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        when {
+                            form.busy -> "Saving…"
+                            form.locked -> "Retry save"
+                            else -> "Create cash account"
+                        },
+                    )
+                }
+            }
         }
     }
 }

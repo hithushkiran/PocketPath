@@ -4,10 +4,9 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -15,11 +14,17 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -30,6 +35,8 @@ import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.domain.model.Account
 import com.pocketpath.ui.components.FinanceChoice
 import com.pocketpath.ui.components.FinanceMessage
+import com.pocketpath.ui.components.FormActions
+import com.pocketpath.ui.components.SectionTabs
 import com.pocketpath.ui.components.lkrText
 
 @Composable
@@ -38,43 +45,97 @@ fun GoalsScreen(
     onEvent: (GoalsEvent) -> Unit = {},
     finance: FinanceUiState = FinanceUiState(),
 ) {
-    val editable = state.userId != null && !state.busy && !state.retryGoal
+    var showDraft by rememberSaveable { mutableStateOf(state.preview != null || state.retryGoal) }
+    var showPreview by rememberSaveable { mutableStateOf(state.preview != null) }
     val accounts = finance.selectableAccounts
-    val preview = state.preview
 
+    Column(Modifier.fillMaxSize()) {
+        SectionTabs(
+            labels = listOf("My goals", "New goal"),
+            selectedIndex = if (showDraft) 1 else 0,
+            onSelect = { showDraft = it == 1 },
+        )
+
+        if (showDraft) {
+            NewGoalForm(state, onEvent, onPreview = {
+                showPreview = true
+                onEvent(GoalsEvent.PreviewDraft)
+            })
+        } else {
+            SavedGoals(state, finance, onEvent, onNewGoal = { showDraft = true })
+        }
+    }
+
+    if (showDraft && showPreview) {
+        state.preview?.let { preview ->
+            GoalPlanPreview(preview, onDismiss = { showPreview = false })
+        }
+    }
+    state.contribution?.takeIf { state.showContribution }?.let { form ->
+        GoalContributionDialog(form, accounts, state.busy, onEvent)
+    }
+}
+
+@Composable
+private fun SavedGoals(
+    state: GoalsUiState,
+    finance: FinanceUiState,
+    onEvent: (GoalsEvent) -> Unit,
+    onNewGoal: () -> Unit,
+) {
+    val accounts = finance.selectableAccounts
+    val editable = state.userId != null && !state.busy && !state.retryGoal
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item {
-            Text("Give your savings a purpose", style = MaterialTheme.typography.headlineSmall)
-        }
-        item {
-            if (state.goalsLoading) Text("Loading goals…")
-            state.goalsError?.let {
-                FinanceMessage(it)
-                TextButton(onClick = { onEvent(GoalsEvent.ReloadGoals) }) { Text("Retry loading goals") }
-            }
-            val pending = state.contribution
-            if (pending?.retryRequired == true && !state.showContribution) {
-                TextButton(onClick = { onEvent(GoalsEvent.OpenContribution(pending.goalId, pending.accountId)) }) {
-                    Text("Review pending contribution")
+        if (state.goalsLoading || state.goalsError != null || state.retryGoal ||
+            state.contribution?.retryRequired == true
+        ) {
+            item {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if (state.goalsLoading) Text("Loading goals…")
+                    state.goalsError?.let {
+                        FinanceMessage(it)
+                        TextButton(onClick = { onEvent(GoalsEvent.ReloadGoals) }) { Text("Retry loading goals") }
+                    }
+                    if (state.retryGoal) {
+                        OutlinedButton(onClick = onNewGoal) { Text("Review goal save") }
+                    }
+                    val pending = state.contribution
+                    if (pending?.retryRequired == true && !state.showContribution) {
+                        OutlinedButton(
+                            onClick = { onEvent(GoalsEvent.OpenContribution(pending.goalId, pending.accountId)) },
+                        ) { Text("Review pending contribution") }
+                    }
                 }
+            }
+        }
+        if (state.goals.isEmpty() && !state.goalsLoading && state.goalsError == null) {
+            item {
+                Text("Start saving toward a goal", style = MaterialTheme.typography.titleLarge)
+                Button(onClick = onNewGoal) { Text("Create a goal") }
             }
         }
         items(state.goals, key = { "goal-" + it.id }) { goal ->
             val progress = finance.savedGoalProgress(goal)
+            val target = goal.target.money.minor
             Card(Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     Text(goal.name, style = MaterialTheme.typography.titleLarge)
-                    Text("Target ${lkrText(goal.target.money.minor)} · Due ${goal.deadline}")
+                    Text("Target ${lkrText(target)} · Due ${goal.deadline}", style = MaterialTheme.typography.bodyMedium)
                     if (progress == null) {
                         Text("Confirmed progress is unavailable.")
                     } else {
+                        if (target > 0L) {
+                            val fraction = (progress.confirmedReservedMinor.toDouble() / target)
+                                .toFloat().coerceIn(0f, 1f)
+                            LinearProgressIndicator(progress = { fraction }, modifier = Modifier.fillMaxWidth())
+                        }
                         SavedGoalPaceDetails(progress)
                     }
                     Button(
@@ -84,109 +145,121 @@ fun GoalsScreen(
                 }
             }
         }
-        item { Text("New goal", style = MaterialTheme.typography.titleMedium) }
-        item {
-            GoalDraftField(
-                "Goal name", state.form.name, GoalField.NAME, state, onEvent,
-                "For example, a laptop or an emergency fund.",
-            )
-        }
-        item {
-            GoalDraftField(
-                "Target amount (LKR)", state.form.target, GoalField.TARGET, state, onEvent,
-                "Positive amount; at most two decimal places, without commas.",
-                KeyboardType.Decimal,
-            )
-        }
-        item {
-            GoalDraftField(
-                "Goal start date", state.form.startDate, GoalField.START_DATE, state, onEvent,
-                "yyyy-MM-dd",
-            )
-        }
-        item {
-            GoalDraftField(
-                "Deadline", state.form.deadline, GoalField.DEADLINE, state, onEvent,
-                "yyyy-MM-dd",
-            )
-        }
-        item {
-            GoalDraftField(
-                "First remaining monthly contribution", state.form.firstContributionDate,
-                GoalField.FIRST_CONTRIBUTION_DATE, state, onEvent,
-                "yyyy-MM-dd. The same day is used monthly; short months use their last day.",
-            )
-        }
-        item {
-            Text("This estimate assumes no confirmed allocation. It does not inspect your accounts.")
-            Button(
-                onClick = { onEvent(GoalsEvent.PreviewDraft) },
-                enabled = editable,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Preview goal plan")
-            }
-            Button(
-                onClick = { onEvent(GoalsEvent.SaveGoal) },
-                enabled = state.userId != null && !state.busy,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(if (state.retryGoal) "Retry saving goal" else "Save goal")
-            }
-            state.saveError?.let { FinanceMessage(it) }
-            TextButton(
-                onClick = { onEvent(GoalsEvent.ClearDraft) },
-                enabled = editable,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Clear draft")
-            }
-            if (state.errors.isNotEmpty()) {
-                FinanceMessage("Review the highlighted fields.")
-            }
-        }
-        if (preview != null) {
+    }
+}
+
+@Composable
+private fun NewGoalForm(state: GoalsUiState, onEvent: (GoalsEvent) -> Unit, onPreview: () -> Unit) {
+    val editable = state.userId != null && !state.busy && !state.retryGoal
+    Column(Modifier.fillMaxSize()) {
+        LazyColumn(
+            modifier = Modifier.weight(1f).fillMaxWidth(),
+            contentPadding = PaddingValues(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(16.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                GoalDraftField(
+                    "Goal name", state.form.name, GoalField.NAME, state, onEvent,
+                    "For example, a laptop or an emergency fund.",
+                )
+            }
+            item {
+                GoalDraftField(
+                    "Target amount (LKR)", state.form.target, GoalField.TARGET, state, onEvent,
+                    "Positive amount with up to two decimal places.",
+                    KeyboardType.Decimal,
+                )
+            }
+            item {
+                GoalDraftField(
+                    "Goal start date", state.form.startDate, GoalField.START_DATE, state, onEvent,
+                    "yyyy-MM-dd",
+                )
+            }
+            item {
+                GoalDraftField(
+                    "Deadline", state.form.deadline, GoalField.DEADLINE, state, onEvent,
+                    "yyyy-MM-dd",
+                )
+            }
+            item {
+                GoalDraftField(
+                    "First monthly contribution", state.form.firstContributionDate,
+                    GoalField.FIRST_CONTRIBUTION_DATE, state, onEvent,
+                    "yyyy-MM-dd. Short months use their last day.",
+                )
+            }
+            item {
+                TextButton(onClick = { onEvent(GoalsEvent.ClearDraft) }, enabled = editable) {
+                    Text("Clear draft")
+                }
+            }
+        }
+
+        FormActions {
+            state.saveError?.let { FinanceMessage(it) }
+            if (state.errors.isNotEmpty()) FinanceMessage("Review the highlighted fields.")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                OutlinedButton(onClick = onPreview, enabled = editable, modifier = Modifier.weight(1f)) {
+                    Text("Preview plan", textAlign = TextAlign.Center)
+                }
+                Button(
+                    onClick = { onEvent(GoalsEvent.SaveGoal) },
+                    enabled = state.userId != null && !state.busy,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    val label = when {
+                        state.busy -> "Saving…"
+                        state.retryGoal -> "Retry save"
+                        else -> "Save goal"
+                    }
+                    Text(label, textAlign = TextAlign.Center)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun GoalPlanPreview(preview: GoalDraftPreview, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Goal plan preview") },
+        text = {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().heightIn(max = 360.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(preview.name, style = MaterialTheme.typography.titleMedium)
+                        Text(lkrText(preview.targetLkrMinor), style = MaterialTheme.typography.headlineSmall)
+                        Text("${preview.startDate} to ${preview.deadline}")
+                        Text("Assumes no money is reserved. This preview does not save the goal.")
+                    }
+                }
+                item {
+                    Text(
+                        "${preview.pace.installments.size} monthly contributions",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                }
+                items(preview.pace.installments, key = { it.date.toString() }) { installment ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text("Unsaved estimate", style = MaterialTheme.typography.labelLarge)
-                        Text(preview.name, style = MaterialTheme.typography.titleLarge)
-                        Text("Target: ${lkrText(preview.targetLkrMinor)}")
-                        Text("Goal period: ${preview.startDate} to ${preview.deadline}")
-                        Text("Assumed confirmed allocation: ${lkrText(0L)}")
-                        Text("Remaining target: ${lkrText(preview.pace.remainingLkrMinor)}")
-                        Text("Monthly contribution dates: ${preview.pace.installments.size}")
-                        Text("No goal was saved and no money was reserved.")
+                        Text(installment.date.toString(), modifier = Modifier.weight(1f))
+                        Text(lkrText(installment.amountLkrMinor), textAlign = TextAlign.End)
                     }
                 }
             }
-            item {
-                Text("Required contributions", style = MaterialTheme.typography.titleMedium)
-                Text("Every date and amount used in this estimate is shown below.")
-            }
-            items(preview.pace.installments, key = { it.date.toString() }) { installment ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(installment.date.toString(), modifier = Modifier.weight(1f))
-                    Text(
-                        lkrText(installment.amountLkrMinor),
-                        modifier = Modifier.weight(1f),
-                        textAlign = TextAlign.End,
-                    )
-                }
-            }
-        }
-        item { Spacer(Modifier.height(88.dp)) }
-    }
-
-    state.contribution?.takeIf { state.showContribution }?.let { form ->
-        GoalContributionDialog(form, accounts, state.busy, onEvent)
-    }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Done") } },
+    )
 }
 
 @Composable

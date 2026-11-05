@@ -74,7 +74,7 @@ fun IncomeSourcesScreen(
 }
 
 @Composable
-private fun IncomeSourceDialog(
+internal fun IncomeSourceDialog(
     state: IncomeSourceManagementUiState,
     onEvent: (ManualIncomeEvent) -> Unit,
 ) {
