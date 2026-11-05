@@ -12,6 +12,7 @@ import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.ui.components.FinanceMessage
 import com.pocketpath.ui.components.FinanceStatus
+import com.pocketpath.ui.components.lkrText
 
 @Composable
 fun ActivityScreen(
@@ -49,6 +50,7 @@ fun ActivityScreen(
         items(state.activity, key = { it.id }) { event ->
             val title = when (event.kind) {
                 TransactionKind.OPENING -> "Opening balance"
+                TransactionKind.GOAL_RESERVE -> "Goal contribution"
                 TransactionKind.EXPENSE -> {
                     val categoryId = event.components.firstOrNull()?.categoryId
                     val name = state.categories.firstOrNull {
@@ -61,8 +63,9 @@ fun ActivityScreen(
             }
 
             val movement = event.movements.singleOrNull()
+            val reservation = event.reservationEffects.singleOrNull()
             val accountName = state.accounts.firstOrNull {
-                it.id == movement?.accountId
+                it.id == (movement?.accountId ?: reservation?.backingAccountId)
             }?.name
 
             Card(modifier = Modifier.fillMaxWidth()) {
@@ -103,6 +106,7 @@ fun ActivityScreen(
                         )
                     }
 
+                    reservation?.let { Text("${lkrText(it.amountLkr.minor)} reserved") }
                     accountName?.let { Text(it) }
                     Text(event.financialTime.occurredLocalDate.toString())
                     event.note?.let { Text(it) }

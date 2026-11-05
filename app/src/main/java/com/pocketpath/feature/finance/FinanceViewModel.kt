@@ -14,6 +14,7 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import java.time.Instant
 import java.time.LocalDate
+import java.time.YearMonth
 import java.time.ZoneId
 import java.util.UUID
 import javax.inject.Inject
@@ -113,6 +114,7 @@ class FinanceViewModel @Inject constructor(
                             bills.copy(
                                 loading = true,
                                 cached = true,
+                                coverageMonth = null,
                                 payment = bills.payment?.copy(
                                     busy = false,
                                     retryRequired = pendingBillPayment != null,
@@ -190,26 +192,34 @@ class FinanceViewModel @Inject constructor(
                                     _state.update { state ->
                                         val bills = state.monthlyBills
                                         state.copy(monthlyBills = when (observation) {
-                                            Observation.Loading -> bills.copy(loading = true, error = null)
+                                            Observation.Loading -> bills.copy(
+                                                loading = true, error = null, coverageMonth = null,
+                                            )
                                             is Observation.Data -> bills.copy(
                                                 occurrences = observation.value,
                                                 loading = false,
                                                 cached = observation.metadata.origin == DataOrigin.CACHE,
+                                                coverageMonth = null,
                                                 error = null,
                                             )
                                             is Observation.Failed -> bills.copy(
                                                 loading = false,
                                                 error = observation.failure.message,
+                                                coverageMonth = null,
                                             )
                                         })
                                     }
                                     if (observation is Observation.Data &&
                                         observation.metadata.origin == DataOrigin.SERVER
                                     ) {
-                                        val extension = current.extendMonthlyBills(observation.value, LocalDate.now(zone))
+                                        val date = LocalDate.now(zone)
+                                        val extension = current.extendMonthlyBills(observation.value, date)
                                         if (epoch == generation && _state.value.userId == uid) {
                                             _state.update { state ->
                                                 state.copy(monthlyBills = state.monthlyBills.copy(
+                                                    coverageMonth = if (extension is CommandResult.Accepted && extension.value) {
+                                                        YearMonth.from(date)
+                                                    } else null,
                                                     recurrenceError = (extension as? CommandResult.Rejected)?.failure?.message,
                                                 ))
                                             }
@@ -361,12 +371,15 @@ class FinanceViewModel @Inject constructor(
                                                 Math.addExact(total, units.minor)
                                             }
 
+                                        val homeLedger = summarizeHomeLedger(ledgerData.value, today, zone)
                                         _state.update {
                                             it.copy(
                                                 loading = false,
                                                 error = null,
                                                 balances = balances,
                                                 poolBalanceMinor = pool,
+                                                goalReservationsMinor = homeLedger.reservedByGoal,
+                                                homeLedger = homeLedger,
                                                 cached = accountData.metadata.origin == DataOrigin.CACHE ||
                                                     ledgerData.metadata.origin == DataOrigin.CACHE,
                                                 lastConfirmedAt = ledgerData.metadata.observedAt?.toString(),
@@ -697,6 +710,23 @@ class FinanceViewModel @Inject constructor(
                     dueDate = event.dueDate ?: form.dueDate,
                     error = null,
                 )
+            }
+            FinanceEvent.OpenPurchasePreview -> _state.update { state ->
+                if (state.homeFunds == null) state
+                else state.copy(purchaseForm = PurchasePreviewForm(
+                    accountId = state.selectableAccounts.firstOrNull { it.includeInEverydayPool }?.id
+                        ?: state.selectableAccounts.firstOrNull()?.id,
+                    categoryId = state.selectableCategories.firstOrNull()?.id,
+                ))
+            }
+            FinanceEvent.ClosePurchasePreview -> _state.update { it.copy(purchaseForm = null) }
+            is FinanceEvent.EditPurchasePreview -> _state.update { state ->
+                val form = state.purchaseForm ?: return@update state
+                state.copy(purchaseForm = form.copy(
+                    amount = event.amount ?: form.amount,
+                    accountId = event.accountId ?: form.accountId,
+                    categoryId = event.categoryId ?: form.categoryId,
+                ))
             }
             FinanceEvent.SaveMonthlyBill -> saveMonthlyBill()
             is FinanceEvent.OpenBillPayment -> openBillPayment(event.occurrenceId)
@@ -1622,6 +1652,7 @@ class FinanceViewModel @Inject constructor(
                     error = message,
                     balances = emptyMap(),
                     poolBalanceMinor = null,
+                    homeLedger = null,
                 )
             }
         }

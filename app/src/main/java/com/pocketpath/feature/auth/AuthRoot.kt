@@ -2,6 +2,8 @@ package com.pocketpath.feature.auth
 
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.feature.finance.FinanceViewModel
+import com.pocketpath.feature.goals.GoalsUiState
+import com.pocketpath.feature.goals.GoalsViewModel
 import com.pocketpath.feature.income.ManualIncomeUiState
 import com.pocketpath.feature.income.ManualIncomeViewModel
 import com.pocketpath.feature.income.ExpectedPaymentsUiState
@@ -33,6 +35,7 @@ import com.pocketpath.navigation.PocketPathApp
 fun AuthRoot(
     viewModel: AuthViewModel,
     financeViewModel: FinanceViewModel,
+    goalsViewModel: GoalsViewModel,
     incomeViewModel: ManualIncomeViewModel,
     expectedPaymentsViewModel: ExpectedPaymentsViewModel,
     expectedPaymentCreationViewModel: ExpectedPaymentCreationViewModel,
@@ -64,6 +67,8 @@ fun AuthRoot(
 
         is AuthSession.SignedIn -> {
             val financeState by financeViewModel.state.collectAsStateWithLifecycle()
+            val goalsState by goalsViewModel.state.collectAsStateWithLifecycle()
+            val visibleGoals = goalsState.takeIf { it.userId == current.user.uid } ?: GoalsUiState()
             val incomeState by incomeViewModel.state.collectAsStateWithLifecycle()
             val expectedPaymentsState by expectedPaymentsViewModel.state.collectAsStateWithLifecycle()
             val expectedPaymentCreationState by expectedPaymentCreationViewModel.state.collectAsStateWithLifecycle()
@@ -94,6 +99,7 @@ fun AuthRoot(
                         ?: visibleFinance.localError,
                     onSignOut = {
                         if (visibleFinance.hasUnresolvedLocalWork || visibleFinance.monthlyBills.hasUnresolvedSave ||
+                            visibleGoals.hasUnresolvedWrite ||
                             visibleIncome.hasUnresolvedIncomeWork ||
                             visibleIncome.hasUnresolvedSourceWork ||
                             visibleExpectedPayments.hasUnresolvedCancellationRetry || visibleExpectedPayments.receiptRecovery.hasWork
@@ -106,6 +112,8 @@ fun AuthRoot(
                         }
                     },
                     financeState = visibleFinance,
+                    goalsState = visibleGoals,
+                    onGoalsEvent = { goalsViewModel.onEvent(current.user.uid, it) },
                     onFinanceEvent = {
                         financeViewModel.onEvent(current.user.uid, it)
                     },
@@ -165,6 +173,11 @@ fun AuthRoot(
                                     if (isNotEmpty()) append("\n\n")
                                     append("A bill or payment may already have reached the server. Signing out discards " +
                                         "its retry details. Check Plan and Activity after signing back in before trying again.")
+                                }
+                                if (visibleGoals.hasUnresolvedWrite) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append("A goal or contribution may already have saved. Signing out clears its " +
+                                        "retry details. Check Goals and Activity after signing back in.")
                                 }
                                 if (visibleIncome.hasUnresolvedIncomeWork) {
                                     if (isNotEmpty()) append("\n\n")

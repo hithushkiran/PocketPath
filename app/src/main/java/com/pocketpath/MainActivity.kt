@@ -1,6 +1,7 @@
 package com.pocketpath
 
 import com.pocketpath.feature.finance.FinanceViewModel
+import com.pocketpath.feature.goals.GoalsViewModel
 import com.pocketpath.feature.income.ManualIncomeViewModel
 import com.pocketpath.feature.income.ExpectedPaymentsViewModel
 import com.pocketpath.feature.income.ExpectedPaymentCreationViewModel
@@ -23,6 +24,7 @@ class MainActivity : ComponentActivity() {
 
         val authViewModel = ViewModelProvider(this)[AuthViewModel::class.java]
         val financeViewModel = ViewModelProvider(this)[FinanceViewModel::class.java]
+        val goalsViewModel = ViewModelProvider(this)[GoalsViewModel::class.java]
         val incomeViewModel = ViewModelProvider(this)[ManualIncomeViewModel::class.java]
         val expectedPaymentsViewModel = ViewModelProvider(this)[ExpectedPaymentsViewModel::class.java]
         val expectedPaymentCreationViewModel = ViewModelProvider(this)[ExpectedPaymentCreationViewModel::class.java]
@@ -32,6 +34,7 @@ class MainActivity : ComponentActivity() {
                 AuthRoot(
                     viewModel = authViewModel,
                     financeViewModel = financeViewModel,
+                    goalsViewModel = goalsViewModel,
                     incomeViewModel = incomeViewModel,
                     expectedPaymentsViewModel = expectedPaymentsViewModel,
                     expectedPaymentCreationViewModel = expectedPaymentCreationViewModel,
