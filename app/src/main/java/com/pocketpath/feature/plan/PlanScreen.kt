@@ -60,6 +60,19 @@ fun PlanScreen(
             }
         }
 
+        item {
+            MonthlyBillsHeader(state.monthlyBills, state.selectableCategories.isNotEmpty(), onEvent)
+        }
+        items(state.monthlyBills.occurrences.size) { index ->
+            val bill = state.monthlyBills.occurrences[index]
+            Card(Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(bill.titleSnapshot, style = MaterialTheme.typography.titleMedium)
+                    Text("First due ${bill.effectiveDueDate} · ${lkrText(bill.expectedAmount.money.minor)}")
+                }
+            }
+        }
+
         val hasBudgets = state.overallMonthlyBudgetProgress != null ||
             state.overallWeeklyBudgetProgress != null ||
             state.categoryBudgetProgresses.isNotEmpty()
@@ -135,6 +148,11 @@ fun PlanScreen(
                 SpendingBreakdownCard(breakdown)
             }
         }
+    }
+
+    val billForm = state.monthlyBills.form
+    if (state.monthlyBills.showForm && billForm != null) {
+        MonthlyBillDialog(billForm, state.selectableCategories, onEvent)
     }
 
     if (state.showBudgetDialog) {

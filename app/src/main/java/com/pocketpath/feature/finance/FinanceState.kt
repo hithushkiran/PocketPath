@@ -10,6 +10,7 @@ import com.pocketpath.domain.model.BudgetScope
 import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
+import com.pocketpath.domain.model.Occurrence
 import com.pocketpath.domain.money.FiatCurrency
 import com.pocketpath.domain.repository.WriteState
 import com.pocketpath.domain.repository.ActivityCursor
@@ -67,6 +68,27 @@ data class BudgetForm(
     val error: String? = null,
 )
 
+data class MonthlyBillForm(
+    val title: String = "",
+    val categoryId: String? = null,
+    val amount: String = "",
+    val dueDate: String = "",
+    val busy: Boolean = false,
+    val retryRequired: Boolean = false,
+    val error: String? = null,
+)
+
+data class MonthlyBillsUiState(
+    val occurrences: List<Occurrence> = emptyList(),
+    val loading: Boolean = true,
+    val cached: Boolean = false,
+    val error: String? = null,
+    val form: MonthlyBillForm? = null,
+    val showForm: Boolean = false,
+) {
+    val hasUnresolvedSave: Boolean get() = form?.let { it.busy || it.retryRequired } == true
+}
+
 data class FinanceUiState(
     val userId: String? = null,
     val loading: Boolean = true,
@@ -88,6 +110,7 @@ data class FinanceUiState(
     val showVoidDialog: Boolean = false,
     val budgetForm: BudgetForm = BudgetForm(),
     val showBudgetDialog: Boolean = false,
+    val monthlyBills: MonthlyBillsUiState = MonthlyBillsUiState(),
     val activity: List<FinancialTransaction> = emptyList(),
     val activityLoading: Boolean = false,
     val activityError: String? = null,
@@ -185,6 +208,16 @@ sealed interface FinanceEvent {
     data class BudgetLimitChanged(val amount: String) : FinanceEvent
     data class ToggleBudgetDialog(val show: Boolean) : FinanceEvent
     data object SubmitBudget : FinanceEvent
+
+    data object OpenMonthlyBill : FinanceEvent
+    data object CloseMonthlyBill : FinanceEvent
+    data class EditMonthlyBill(
+        val title: String? = null,
+        val categoryId: String? = null,
+        val amount: String? = null,
+        val dueDate: String? = null,
+    ) : FinanceEvent
+    data object SaveMonthlyBill : FinanceEvent
 
     data object ReloadActivity : FinanceEvent
     data object LoadMoreActivity : FinanceEvent
