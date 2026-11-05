@@ -17,6 +17,7 @@ fun AccountsScreen(
     onRecordIncome: () -> Unit,
     onManageIncomeSources: () -> Unit,
     onExpectedPayments: () -> Unit,
+    onIncomeReminders: () -> Unit,
 ) {
     val form = state.accountForm
     val editable = state.canEditDraft && !form.busy && !form.locked && !form.saved
@@ -102,6 +103,10 @@ fun AccountsScreen(
 
         OutlinedButton(onClick = onExpectedPayments, modifier = Modifier.fillMaxWidth()) {
             Text("Expected payments")
+        }
+
+        OutlinedButton(onClick = onIncomeReminders, modifier = Modifier.fillMaxWidth()) {
+            Text("Recurring income")
         }
 
         if (state.ready && state.accounts.isEmpty()) {

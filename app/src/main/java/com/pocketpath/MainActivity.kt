@@ -3,6 +3,7 @@ package com.pocketpath
 import com.pocketpath.feature.finance.FinanceViewModel
 import com.pocketpath.feature.goals.GoalsViewModel
 import com.pocketpath.feature.income.ManualIncomeViewModel
+import com.pocketpath.feature.income.IncomeRemindersViewModel
 import com.pocketpath.feature.income.ExpectedPaymentsViewModel
 import com.pocketpath.feature.income.ExpectedPaymentCreationViewModel
 import android.os.Bundle
@@ -26,6 +27,7 @@ class MainActivity : ComponentActivity() {
         val financeViewModel = ViewModelProvider(this)[FinanceViewModel::class.java]
         val goalsViewModel = ViewModelProvider(this)[GoalsViewModel::class.java]
         val incomeViewModel = ViewModelProvider(this)[ManualIncomeViewModel::class.java]
+        val incomeRemindersViewModel = ViewModelProvider(this)[IncomeRemindersViewModel::class.java]
         val expectedPaymentsViewModel = ViewModelProvider(this)[ExpectedPaymentsViewModel::class.java]
         val expectedPaymentCreationViewModel = ViewModelProvider(this)[ExpectedPaymentCreationViewModel::class.java]
 
@@ -36,6 +38,7 @@ class MainActivity : ComponentActivity() {
                     financeViewModel = financeViewModel,
                     goalsViewModel = goalsViewModel,
                     incomeViewModel = incomeViewModel,
+                    incomeRemindersViewModel = incomeRemindersViewModel,
                     expectedPaymentsViewModel = expectedPaymentsViewModel,
                     expectedPaymentCreationViewModel = expectedPaymentCreationViewModel,
                 )

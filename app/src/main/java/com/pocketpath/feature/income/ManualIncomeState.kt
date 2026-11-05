@@ -10,7 +10,11 @@ import com.pocketpath.domain.model.IncomeSourceKind
 import com.pocketpath.domain.model.ReportComponent
 import com.pocketpath.domain.model.TransactionKind
 import com.pocketpath.domain.model.TransactionStatus
+import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.FiatCurrency
+import com.pocketpath.domain.money.historicalLkrValue
+import com.pocketpath.domain.money.parseUsdReceiptRate
+import com.pocketpath.domain.money.ValuationRate
 import com.pocketpath.domain.money.KnownLkrAmount
 import com.pocketpath.domain.money.Money
 import com.pocketpath.domain.money.NativeAmount
@@ -37,7 +41,17 @@ data class ManualIncomeUiState(
     val replayed: Boolean = false,
     val writeState: WriteState? = null,
     val sourceManagement: IncomeSourceManagementUiState = IncomeSourceManagementUiState(),
+    val convertedUsd: Boolean = false,
+    val usdRate: String = "",
 ) {
+    val canRecordConvertedUsd: Boolean
+        get() = selectableSources.any { it.id == sourceId && it.kind == IncomeSourceKind.ADSENSE }
+
+    val convertedCreditMinor: Long?
+        get() = if (convertedUsd) {
+            runCatching { usdIncomeAmounts(amount, usdRate).credit.minor }.getOrNull()
+        } else null
+
     internal fun canStartSave(): Boolean = referencesReady && !busy && !saved
 
     /** A frozen online income request exists only in this ViewModel's memory. */
@@ -75,6 +89,8 @@ sealed interface ManualIncomeEvent {
     data class SourceChanged(val id: String) : ManualIncomeEvent
     data class AccountChanged(val id: String) : ManualIncomeEvent
     data class AmountChanged(val value: String) : ManualIncomeEvent
+    data class ConvertedUsdChanged(val enabled: Boolean) : ManualIncomeEvent
+    data class UsdRateChanged(val value: String) : ManualIncomeEvent
     data class DateChanged(val value: String) : ManualIncomeEvent
     data class NoteChanged(val value: String) : ManualIncomeEvent
     data object Save : ManualIncomeEvent
@@ -105,6 +121,19 @@ internal object IncomeSourceFactory {
     }
 }
 
+private data class UsdIncomeAmounts(
+    val original: NativeAmount.Fiat,
+    val rate: ValuationRate,
+    val credit: Money,
+)
+
+private fun usdIncomeAmounts(amount: String, rateText: String): UsdIncomeAmounts {
+    val original = NativeAmount.Fiat(EntryAmount(Money.parse(amount.trim(), FiatCurrency.USD)).money)
+    val rate = parseUsdReceiptRate(rateText.trim())
+    val credit = EntryAmount(historicalLkrValue(original, rate)).money
+    return UsdIncomeAmounts(original, rate, credit)
+}
+
 /** Shared with JVM tests so form validation and exact event construction stay outside Compose. */
 internal object ManualIncomeEventFactory {
     fun create(
@@ -118,19 +147,24 @@ internal object ManualIncomeEventFactory {
         now: Instant,
         accounts: List<Account>,
         sources: List<IncomeSource>,
+        usdRateText: String? = null,
     ): FinancialTransaction {
         val source = requireNotNull(sourceId) { "Select an income source." }
         val account = requireNotNull(accountId) { "Select a receiving account." }
         require(accounts.any { it.id == account && it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null }) {
             "Select an active LKR receiving account."
         }
-        require(sources.any {
+        val selectedSource = requireNotNull(sources.firstOrNull {
             it.id == source && it.metadata.archivedAt == null &&
                 (it.defaultCurrency == null || it.defaultCurrency == FiatCurrency.LKR)
-        }) { "Select an active LKR income source." }
+        }) { "Select an active income source." }
+        require(usdRateText == null || selectedSource.kind == IncomeSourceKind.ADSENSE) {
+            "Select an AdSense source for a converted USD receipt."
+        }
         require(noteText.length <= 1000) { "Notes allow 1000 characters." }
 
-        val money = Money.parse(amountText.trim(), FiatCurrency.LKR)
+        val converted = usdRateText?.let { usdIncomeAmounts(amountText, it) }
+        val money = converted?.credit ?: Money.parse(amountText.trim(), FiatCurrency.LKR)
         require(money.minor > 0) { "Enter a positive LKR amount." }
         val date = LocalDate.parse(dateText.trim())
         val today = now.atZone(zone).toLocalDate()
@@ -149,6 +183,8 @@ internal object ManualIncomeEventFactory {
                     nature = ComponentNature.EARNING,
                     lkrAmount = KnownLkrAmount.Known(money),
                     incomeSourceId = source,
+                    originalAmount = converted?.original,
+                    valuationRate = converted?.rate,
                 ),
             ),
             note = noteText.trim().takeIf { it.isNotEmpty() },

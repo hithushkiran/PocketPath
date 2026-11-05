@@ -9,6 +9,7 @@ import com.pocketpath.domain.repository.CompleteLedger
 import com.pocketpath.domain.repository.LedgerScope
 import java.time.Instant
 import java.time.LocalDate
+import java.time.YearMonth
 
 data class GoalProgress(
     val goalId: String,
@@ -87,6 +88,36 @@ data class SavingsPace(
     val remainingLkrMinor: Long,
     val installments: List<GoalInstallment>,
 )
+
+data class SavedGoalProgress(
+    val goal: Goal,
+    val confirmedReservedMinor: Long,
+    val pace: SavingsPace,
+)
+
+/** Preserve the anchor day after a short month and exclude elapsed dates. */
+fun monthlyGoalDates(first: LocalDate, deadline: LocalDate, asOfDate: LocalDate = first): List<LocalDate> {
+    require(first <= deadline)
+    val start = maxOf(first, asOfDate)
+    if (start > deadline) return emptyList()
+    val dates = mutableListOf<LocalDate>()
+    var month = YearMonth.from(start)
+    val lastMonth = YearMonth.from(deadline)
+    while (month <= lastMonth) {
+        val date = OccurrenceCalculator.monthlyDate(first, month)
+        if (date in start..deadline) dates += date
+        if (month == lastMonth) break
+        month = month.plusMonths(1)
+    }
+    return dates
+}
+
+fun calculateSavedGoalProgress(goal: Goal, reservedLkrMinor: Long, asOfDate: LocalDate): SavedGoalProgress {
+    val dates = goal.firstContributionDate?.let { monthlyGoalDates(it, goal.deadline, asOfDate) }.orEmpty()
+    return SavedGoalProgress(
+        goal, reservedLkrMinor, calculateSavingsPace(goal, reservedLkrMinor, asOfDate, dates),
+    )
+}
 
 /** Dates are supplied explicitly: no guessed month count or device-clock dependency. */
 fun calculateSavingsPace(

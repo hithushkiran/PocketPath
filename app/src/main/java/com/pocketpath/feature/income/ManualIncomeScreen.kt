@@ -6,11 +6,16 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.Alignment
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DropdownMenu
@@ -28,9 +33,10 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.pocketpath.domain.repository.WriteState
+import com.pocketpath.ui.components.lkrText
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
@@ -59,7 +65,7 @@ fun ManualIncomeScreen(
 
         if (state.loading) Text("Loading income sources and accounts…")
         if (!state.loading && state.selectableSources.isEmpty()) {
-            Text("No active LKR income sources are available.")
+            Text("No active income sources are available.")
         }
         if (!state.loading && state.selectableAccounts.isEmpty()) {
             Text("No active LKR receiving accounts are available.")
@@ -84,16 +90,52 @@ fun ManualIncomeScreen(
             onSelected = { onEvent(ManualIncomeEvent.AccountChanged(it)) },
         )
 
+        if (state.canRecordConvertedUsd || state.convertedUsd) {
+            Row(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).toggleable(
+                    value = state.convertedUsd,
+                    enabled = editable,
+                    role = Role.Checkbox,
+                    onValueChange = { onEvent(ManualIncomeEvent.ConvertedUsdChanged(it)) },
+                ),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Checkbox(checked = state.convertedUsd, onCheckedChange = null, enabled = editable)
+                Text("AdSense payment converted from USD")
+            }
+        }
+
         OutlinedTextField(
             value = state.amount,
             onValueChange = { onEvent(ManualIncomeEvent.AmountChanged(it)) },
-            label = { Text("Amount (LKR)") },
+            label = { Text(if (state.convertedUsd) "Original amount (USD)" else "Amount (LKR)") },
             supportingText = { Text("Use at most two decimal places, without commas.") },
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
             singleLine = true,
             enabled = editable,
             modifier = Modifier.fillMaxWidth(),
         )
+
+        if (state.convertedUsd) {
+            OutlinedTextField(
+                value = state.usdRate,
+                onValueChange = { onEvent(ManualIncomeEvent.UsdRateChanged(it)) },
+                label = { Text("Applied exchange rate (LKR per USD)") },
+                supportingText = { Text("Enter the actual rate for this receipt, up to six decimal places.") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                singleLine = true,
+                enabled = editable,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            val credit = state.convertedCreditMinor
+            if (credit != null) {
+                Text("Account credit: ${lkrText(credit)}. Check this against the amount received.")
+            } else if (state.amount.isNotBlank() && state.usdRate.isNotBlank()) {
+                Text("Enter a positive USD amount and rate that produce a valid LKR credit.",
+                    color = MaterialTheme.colorScheme.error)
+            }
+        }
 
         OutlinedButton(
             onClick = { showDatePicker = true },
@@ -127,7 +169,8 @@ fun ManualIncomeScreen(
             Button(
                 onClick = { onEvent(ManualIncomeEvent.Save) },
                 enabled = state.referencesReady && !state.busy &&
-                    state.selectableAccounts.isNotEmpty() && state.selectableSources.isNotEmpty(),
+                    state.selectableAccounts.isNotEmpty() && state.selectableSources.isNotEmpty() &&
+                    (state.locked || !state.convertedUsd || state.convertedCreditMinor != null),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(if (state.busy) "Saving…" else if (state.locked) "Retry save" else "Save income")

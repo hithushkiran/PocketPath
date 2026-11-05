@@ -3,6 +3,8 @@ package com.pocketpath.data.firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FieldValue
 import com.pocketpath.domain.model.*
+import com.pocketpath.domain.calculation.manualCryptoAssets
+import com.pocketpath.domain.calculation.requireManualCryptoQuantity
 import com.pocketpath.domain.money.*
 import java.time.Instant
 import java.time.LocalDate
@@ -284,8 +286,7 @@ internal object FoundationCodec {
     fun accountData(account: Account): Map<String, Any> {
         checkId(account.id)
         checkId(account.openingTransactionId)
-        require(account.asset == FiatCurrency.LKR)
-        require(account.type != AccountType.CRYPTO_WALLET)
+        require(account.asset == FiatCurrency.LKR || account.asset in manualCryptoAssets)
         require(account.metadata == RecordMetadata()) {
             "New accounts cannot supply server metadata"
         }
@@ -294,9 +295,9 @@ internal object FoundationCodec {
         return buildMap {
             put("name", account.name)
             put("type", account.type.name)
-            put("currencyCode", "LKR")
-            put("assetClass", "FIAT")
-            put("scale", 2L)
+            put("currencyCode", account.asset.code)
+            put("assetClass", if (account.asset is CryptoAsset) "CRYPTO" else "FIAT")
+            put("scale", account.asset.scale.toLong())
             put("includeInEverydayPool", account.includeInEverydayPool)
             put("openingTransactionId", account.openingTransactionId)
             put("openedOn", account.openedOn.toString())
@@ -313,15 +314,18 @@ internal object FoundationCodec {
             accountRequired,
             setOf("institutionLabel", "archivedAt", "lastGoalReserveId"),
         )
-        require(data.text("currencyCode") == "LKR")
-        require(data.text("assetClass") == "FIAT")
-        require(data.integer("scale") == 2L)
+        val asset = if (data.text("assetClass") == "CRYPTO") {
+            cryptoAsset(data)
+        } else {
+            require(data.text("currencyCode") == "LKR" && data.text("assetClass") == "FIAT" && data.integer("scale") == 2L)
+            FiatCurrency.LKR
+        }
 
         return Account(
             id = id,
             name = data.text("name"),
             type = AccountType.valueOf(data.text("type")),
-            asset = FiatCurrency.LKR,
+            asset = asset,
             includeInEverydayPool = data.boolean("includeInEverydayPool"),
             openingTransactionId = data.text("openingTransactionId").also(::checkId),
             openedOn = LocalDate.parse(data.text("openedOn")),
@@ -374,13 +378,66 @@ internal object FoundationCodec {
         )
     }
 
+    private val incomeComponentKeys = setOf("nature", "amountLkrMinor", "incomeSourceId")
+    private val convertedUsdKeys = setOf("originalCurrency", "originalAmountMinor", "valuationRate", "rateSource")
+
+    private fun cryptoAsset(data: FirestoreFields): CryptoAsset = manualCryptoAssets.single {
+        it.code == data.text("currencyCode") && it.scale.toLong() == data.integer("scale")
+    }
+
+    private fun cryptoQuantity(asset: CryptoAsset, atomic: String): CryptoQuantity {
+        require(atomic.matches(Regex("0|-?[1-9][0-9]{0,11}")))
+        return CryptoQuantity(asset, atomic.toBigInteger())
+    }
+
+    fun cryptoPosition(id: String, data: FirestoreFields): CryptoPosition {
+        checkId(id)
+        data.checkKeys(setOf("currencyCode", "scale", "quantityAtomic", "costLkrMinor",
+            "lastTransactionId", "version", "costMethod", "lastTradeAt", "updatedAt"))
+        require(data.text("costMethod") == CostMethod.MOVING_AVERAGE_V1.name)
+        val position = CryptoPosition(
+            id, cryptoQuantity(cryptoAsset(data), data.text("quantityAtomic")),
+            KnownLkrAmount.Known(Money.lkr(data.integer("costLkrMinor"))),
+            data.text("lastTransactionId").also(::checkId), data.integer("version"),
+        )
+        require(position.version > 0L)
+        data.instant("lastTradeAt")
+        data.instant("updatedAt")
+        return position
+    }
+
+    fun cryptoPositionData(position: CryptoPosition, occurredAt: Instant): Map<String, Any> {
+        requireManualCryptoQuantity(position.quantity)
+        return mapOf(
+            "currencyCode" to position.quantity.asset.code,
+            "scale" to position.quantity.asset.scale.toLong(),
+            "quantityAtomic" to position.quantity.atomic.toString(),
+            "costLkrMinor" to (position.cost as KnownLkrAmount.Known).amount.minor,
+            "lastTransactionId" to position.lastTransactionId,
+            "version" to position.version,
+            "costMethod" to position.costMethod.name,
+            "lastTradeAt" to timestamp(occurredAt),
+            "updatedAt" to FieldValue.serverTimestamp(),
+        )
+    }
+
+    private val supportedEventKinds = setOf(
+        TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE,
+        TransactionKind.CRYPTO_BUY, TransactionKind.CRYPTO_SELL,
+    )
+
     fun eventData(event: FinancialTransaction): Map<String, Any> {
         checkId(event.id)
-        require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE))
+        require(event.kind in supportedEventKinds)
         require(event.status == TransactionStatus.POSTED && event.revision == 0L)
         require(event.voidMetadata == null)
         val isReserve = event.kind == TransactionKind.GOAL_RESERVE
-        require(event.movements.size == if (isReserve) 0 else 1)
+        val trade = event.cryptoTrade
+        require(event.movements.size == when {
+            isReserve -> 0
+            trade != null -> 2
+            else -> 1
+        })
         require(event.reservationEffects.size == if (isReserve) 1 else 0)
         require(event.valuations.isEmpty())
         if (isReserve) {
@@ -391,24 +448,30 @@ internal object FoundationCodec {
         }
         event.occurrenceId?.let {
             checkId(it)
-            require(event.kind == TransactionKind.EXPENSE)
+            require(event.kind == TransactionKind.EXPENSE || (event.kind == TransactionKind.INCOME &&
+                event.expectedPaymentId == null && event.id == StableIds.scheduledReceipt(it)))
         }
         require(event.originalTransactionId == null && event.goalPlanId == null)
-        require(event.cryptoTrade == null)
+        require(trade == null || event.merchantLabel == null && event.replacesTransactionId == null)
         require(event.merchantLabel == null || event.merchantLabel.length <= 1000)
         event.replacesTransactionId?.let { checkId(it) }
 
         val movementData = event.movements.map { movement ->
             checkId(movement.accountId)
-            val amount = movement.amount as? NativeAmount.Fiat
-                ?: error("Only fiat movements are supported by this adapter")
-            require(amount.money.currency == FiatCurrency.LKR)
-            mapOf(
-                "accountId" to movement.accountId,
-                "currencyCode" to "LKR",
-                "assetClass" to "FIAT",
-                "amountMinor" to amount.money.minor,
-            )
+            when (val amount = movement.amount) {
+                is NativeAmount.Fiat -> {
+                    require(amount.money.currency == FiatCurrency.LKR)
+                    mapOf("accountId" to movement.accountId, "currencyCode" to "LKR",
+                        "assetClass" to "FIAT", "amountMinor" to amount.money.minor)
+                }
+                is NativeAmount.Crypto -> {
+                    require(trade != null || event.kind == TransactionKind.OPENING && amount.quantity.atomic.signum() == 0)
+                    requireManualCryptoQuantity(amount.quantity)
+                    mapOf("accountId" to movement.accountId, "currencyCode" to amount.asset.code,
+                        "assetClass" to "CRYPTO", "scale" to amount.asset.scale.toLong(),
+                        "quantityAtomic" to amount.quantity.atomic.toString())
+                }
+            }
         }
 
         val componentData = when (event.kind) {
@@ -419,14 +482,32 @@ internal object FoundationCodec {
                 val component = event.components.single()
                 require(component.nature == ComponentNature.EARNING)
                 require(component.categoryId == null && component.commitmentClass == null)
-                require(component.originalAmount == null && component.valuationRate == null && component.rateSnapshotId == null)
+                require(component.rateSnapshotId == null)
                 val sourceId = requireNotNull(component.incomeSourceId).also(::checkId)
                 val amountLkr = component.lkrAmount as? KnownLkrAmount.Known
                     ?: error("Manual income must have a known LKR amount")
                 require(amountLkr.amount == amount.money)
-                listOf(mapOf("nature" to component.nature.name, "amountLkrMinor" to amountLkr.amount.minor, "incomeSourceId" to sourceId))
+                listOf(buildMap<String, Any> {
+                    put("nature", component.nature.name)
+                    put("amountLkrMinor", amountLkr.amount.minor)
+                    put("incomeSourceId", sourceId)
+                    component.originalAmount?.let { original ->
+                        require(event.expectedPaymentId == null)
+                        require(original is NativeAmount.Fiat && original.money.currency == FiatCurrency.USD)
+                        require(original.money.minor > 0)
+                        put("originalCurrency", FiatCurrency.USD.code)
+                        put("originalAmountMinor", original.money.minor)
+                        put("valuationRate", usdReceiptRateText(requireNotNull(component.valuationRate)))
+                        put("rateSource", ValuationSource.MANUAL_ACTUAL.name)
+                    }
+                })
             }
             else -> event.components.map { component ->
+                if (component.nature == ComponentNature.REALIZED_CRYPTO) {
+                    require(event.kind == TransactionKind.CRYPTO_SELL)
+                    return@map mapOf("nature" to component.nature.name,
+                        "amountLkrMinor" to (component.lkrAmount as KnownLkrAmount.Known).amount.minor)
+                }
                 require(component.nature == ComponentNature.SPENDING)
                 require(component.originalAmount == null && component.valuationRate == null)
                 require(component.rateSnapshotId == null && component.incomeSourceId == null)
@@ -462,6 +543,28 @@ internal object FoundationCodec {
                 )
             })
             put("valuations", emptyList<Any>())
+            trade?.let {
+                val gross = (it.grossQuoteAmount as NativeAmount.Fiat).money
+                require(gross.currency == FiatCurrency.LKR && it.proceedsOrAcquisitionLkr == gross)
+                require(it.fees.size <= 1)
+                val fee = it.fees.singleOrNull()
+                require(fee == null || (fee.accountId == it.quoteAccountId && fee.amount == NativeAmount.Fiat(fee.lkrAmount)))
+                requireManualCryptoQuantity(it.quantity)
+                put("cryptoTrade", buildMap<String, Any> {
+                    put("assetAccountId", it.assetAccountId)
+                    put("quoteAccountId", it.quoteAccountId)
+                    put("quantityAtomic", it.quantity.atomic.toString())
+                    put("grossQuoteMinor", gross.minor)
+                    put("feeLkrMinor", fee?.lkrAmount?.minor ?: 0L)
+                    put("costMethod", it.costMethod.name)
+                    it.allocatedCost?.let { cost ->
+                        put("allocatedCostLkrMinor", (cost as KnownLkrAmount.Known).amount.minor)
+                    }
+                    it.realizedPnl?.let { pnl ->
+                        put("realizedPnlLkrMinor", (pnl as KnownLkrAmount.Known).amount.minor)
+                    }
+                })
+            }
             event.occurrenceId?.let { put("occurrenceId", it) }
             event.expectedPaymentId?.let { put("expectedPaymentId", it) }
             event.note?.let { put("note", it) }
@@ -485,7 +588,7 @@ internal object FoundationCodec {
         pending: Boolean = false,
     ): FinancialTransaction {
         checkId(id)
-        data.checkKeys(eventRequired, setOf("note", "merchantLabel", "occurrenceId", "expectedPaymentId", "voidMetadata", "updatedAt", "replacesTransactionId"))
+        data.checkKeys(eventRequired, setOf("note", "merchantLabel", "occurrenceId", "expectedPaymentId", "voidMetadata", "updatedAt", "replacesTransactionId", "cryptoTrade"))
         require(data.text("operationId") == id)
         require(data.integer("schemaVersion") == 1L)
         val revision = data.integer("revision")
@@ -512,7 +615,7 @@ internal object FoundationCodec {
         val replacesTransactionId = data.optionalText("replacesTransactionId")?.also(::checkId)
 
         val kind = TransactionKind.valueOf(data.text("kind"))
-        require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE)) {
+        require(kind in supportedEventKinds) {
             "Unsupported transaction kind: $kind"
         }
         val effects = data.maps("reservationEffects").map { effect ->
@@ -528,24 +631,64 @@ internal object FoundationCodec {
         require(data.list("valuations").isEmpty())
 
         val movements = data.maps("movements").map { movement ->
-            movement.checkKeys(
-                setOf("accountId", "currencyCode", "assetClass", "amountMinor"),
-            )
-            require(movement.text("currencyCode") == "LKR")
-            require(movement.text("assetClass") == "FIAT")
+            val amount = if (movement.text("assetClass") == "CRYPTO") {
+                movement.checkKeys(setOf("accountId", "currencyCode", "assetClass", "scale", "quantityAtomic"))
+                val quantity = cryptoQuantity(cryptoAsset(movement), movement.text("quantityAtomic"))
+                require(kind == TransactionKind.CRYPTO_BUY || kind == TransactionKind.CRYPTO_SELL ||
+                    kind == TransactionKind.OPENING && quantity.atomic.signum() == 0)
+                NativeAmount.Crypto(quantity)
+            } else {
+                movement.checkKeys(setOf("accountId", "currencyCode", "assetClass", "amountMinor"))
+                require(movement.text("currencyCode") == "LKR" && movement.text("assetClass") == "FIAT")
+                NativeAmount.Fiat(Money.lkr(movement.integer("amountMinor")))
+            }
+            AccountMovement(movement.text("accountId").also(::checkId), amount)
+        }
 
-            AccountMovement(
-                accountId = movement.text("accountId").also(::checkId),
-                amount = NativeAmount.Fiat(Money.lkr(movement.integer("amountMinor"))),
+        val trade = data.optionalMap("cryptoTrade")?.let { fields ->
+            val required = setOf("assetAccountId", "quoteAccountId", "quantityAtomic", "grossQuoteMinor", "feeLkrMinor", "costMethod")
+            val sell = kind == TransactionKind.CRYPTO_SELL
+            require(sell || kind == TransactionKind.CRYPTO_BUY)
+            fields.checkKeys(if (sell) required + setOf("allocatedCostLkrMinor", "realizedPnlLkrMinor") else required)
+            require(fields.text("costMethod") == CostMethod.MOVING_AVERAGE_V1.name)
+            val wallet = fields.text("assetAccountId").also(::checkId)
+            val quote = fields.text("quoteAccountId").also(::checkId)
+            val asset = (movements.single { it.accountId == wallet }.amount as NativeAmount.Crypto).quantity.asset
+            val gross = EntryAmount(Money.lkr(fields.integer("grossQuoteMinor"))).money
+            val fee = Money.lkr(fields.integer("feeLkrMinor"))
+            require(fee.minor >= 0L && (!sell || fee.minor < gross.minor))
+            CryptoTrade(
+                wallet, quote, cryptoQuantity(asset, fields.text("quantityAtomic")), NativeAmount.Fiat(gross),
+                if (fee.minor == 0L) emptyList() else listOf(TradeFee(quote, NativeAmount.Fiat(fee), fee)), gross,
+                if (sell) KnownLkrAmount.Known(Money.lkr(fields.integer("allocatedCostLkrMinor"))) else null,
+                if (sell) KnownLkrAmount.Known(Money.lkr(fields.integer("realizedPnlLkrMinor"))) else null,
             )
         }
 
         val components = data.maps("components").map { component ->
             val amountLkr = KnownLkrAmount.Known(Money.lkr(component.integer("amountLkrMinor")))
             if (kind == TransactionKind.INCOME) {
-                component.checkKeys(setOf("nature", "amountLkrMinor", "incomeSourceId"))
+                component.checkKeys(incomeComponentKeys, convertedUsdKeys)
                 require(component.text("nature") == "EARNING")
-                ReportComponent(ComponentNature.EARNING, amountLkr, incomeSourceId = component.text("incomeSourceId").also(::checkId))
+                val hasConversion = component.keys.any { it in convertedUsdKeys }
+                val original = if (hasConversion) {
+                    require("expectedPaymentId" !in data)
+                    require(component.text("originalCurrency") == FiatCurrency.USD.code)
+                    require(component.text("rateSource") == ValuationSource.MANUAL_ACTUAL.name)
+                    NativeAmount.Fiat(EntryAmount(Money(FiatCurrency.USD, component.integer("originalAmountMinor"))).money)
+                } else null
+                val rate = if (hasConversion) {
+                    val stored = component.text("valuationRate")
+                    parseUsdReceiptRate(stored).also { require(usdReceiptRateText(it) == stored) }
+                } else null
+                ReportComponent(
+                    ComponentNature.EARNING, amountLkr,
+                    incomeSourceId = component.text("incomeSourceId").also(::checkId),
+                    originalAmount = original, valuationRate = rate,
+                )
+            } else if (kind == TransactionKind.CRYPTO_SELL && component.text("nature") == "REALIZED_CRYPTO") {
+                component.checkKeys(setOf("nature", "amountLkrMinor"))
+                ReportComponent(ComponentNature.REALIZED_CRYPTO, amountLkr)
             } else {
                 component.checkKeys(setOf("nature", "amountLkrMinor", "categoryId", "commitmentClass"))
                 require(component.text("nature") == "SPENDING")
@@ -567,12 +710,14 @@ internal object FoundationCodec {
             components = components,
             reservationEffects = effects,
             occurrenceId = data.optionalText("occurrenceId")?.also(::checkId)?.also {
-                require(kind == TransactionKind.EXPENSE)
+                require(kind == TransactionKind.EXPENSE || (kind == TransactionKind.INCOME &&
+                    "expectedPaymentId" !in data && id == StableIds.scheduledReceipt(it)))
             },
             expectedPaymentId = data.optionalText("expectedPaymentId")?.also(::checkId),
             note = data.optionalText("note"),
             merchantLabel = data.optionalText("merchantLabel"),
             replacesTransactionId = replacesTransactionId,
+            cryptoTrade = trade,
             voidMetadata = voidMetadata,
             revision = revision,
             createdAt = if (pending && data["createdAt"] == null) {
@@ -582,7 +727,11 @@ internal object FoundationCodec {
             },
         )
 
-        require(result.movements.size == if (isReserve) 0 else 1)
+        require(result.movements.size == when {
+            isReserve -> 0
+            trade != null -> 2
+            else -> 1
+        })
         if (isReserve) require(result.merchantLabel == null && result.replacesTransactionId == null)
         if (kind == TransactionKind.INCOME) {
             val movement = result.movements.single().amount as NativeAmount.Fiat
@@ -614,6 +763,113 @@ internal object FoundationCodec {
     }
 
     /** The first fixed monthly LKR bill and its first due occurrence share one immutable save. */
+    fun incomeReminderScheduleData(schedule: Schedule): Map<String, Any> {
+        checkId(schedule.id)
+        val source = requireNotNull(schedule.incomeSourceId).also(::checkId)
+        val account = requireNotNull(schedule.preferredAccountId).also(::checkId)
+        require(schedule.kind == ScheduleKind.INCOME_REMINDER && schedule.amountMode == AmountMode.ESTIMATE)
+        require(schedule.expectedAmount.money.currency == FiatCurrency.LKR && schedule.timeZone.id == "Asia/Colombo")
+        require(schedule.activeFrom == schedule.recurrence.anchorDate && schedule.activeFrom.year in 1..9999)
+        require(schedule.title.length <= 80 && !schedule.paused && schedule.endDate == null)
+        require(schedule.metadata == RecordMetadata() && schedule.remindLocalTime == null && schedule.reminderLeadDays == 0)
+        require(schedule.lastConfirmedAmount == null)
+        return mapOf(
+            "kind" to schedule.kind.name,
+            "title" to schedule.title,
+            "frequency" to schedule.recurrence.frequency.name,
+            "interval" to 1L,
+            "anchorDate" to schedule.activeFrom.toString(),
+            "activeFrom" to schedule.activeFrom.toString(),
+            "timeZone" to schedule.timeZone.id,
+            "expectedAmountMinor" to schedule.expectedAmount.money.minor,
+            "currencyCode" to "LKR",
+            "amountMode" to schedule.amountMode.name,
+            "incomeSourceId" to source,
+            "preferredAccountId" to account,
+            "paused" to false,
+            "reminderLeadDays" to 0L,
+            "createdAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp(),
+            "revision" to 0L,
+        )
+    }
+
+    fun incomeReminderSchedule(id: String, data: FirestoreFields): Schedule {
+        checkId(id)
+        data.checkKeys(setOf(
+            "kind", "title", "frequency", "interval", "anchorDate", "activeFrom", "timeZone",
+            "expectedAmountMinor", "currencyCode", "amountMode", "incomeSourceId", "preferredAccountId",
+            "paused", "reminderLeadDays", "createdAt", "updatedAt", "revision",
+        ))
+        val anchor = LocalDate.parse(data.text("anchorDate"))
+        require(data.text("kind") == "INCOME_REMINDER" && data.text("amountMode") == "ESTIMATE")
+        require(data.text("currencyCode") == "LKR" && data.text("timeZone") == "Asia/Colombo")
+        require(data.text("activeFrom") == anchor.toString() && data.integer("interval") == 1L)
+        require(!data.boolean("paused") && data.integer("reminderLeadDays") == 0L && data.integer("revision") == 0L)
+        return Schedule(
+            id, ScheduleKind.INCOME_REMINDER, data.text("title"),
+            Recurrence(Frequency.valueOf(data.text("frequency")), anchor), ZoneId.of(data.text("timeZone")),
+            EntryAmount(Money.lkr(data.integer("expectedAmountMinor"))), AmountMode.ESTIMATE, anchor,
+            incomeSourceId = data.text("incomeSourceId").also(::checkId),
+            preferredAccountId = data.text("preferredAccountId").also(::checkId),
+            metadata = RecordMetadata(createdAt = data.instant("createdAt"), updatedAt = data.instant("updatedAt")),
+        )
+    }
+
+    fun incomeReminderOccurrenceData(occurrence: Occurrence): Map<String, Any> = buildMap {
+        require(occurrence.kind == ScheduleKind.INCOME_REMINDER && occurrence.expectedAmount.money.currency == FiatCurrency.LKR)
+        put("scheduleId", occurrence.scheduleId.also(::checkId))
+        put("nominalDate", occurrence.nominalDate.toString())
+        put("effectiveDueDate", occurrence.effectiveDueDate.toString())
+        put("kind", occurrence.kind.name)
+        put("titleSnapshot", occurrence.titleSnapshot)
+        put("expectedAmountMinor", occurrence.expectedAmount.money.minor)
+        put("currencyCode", "LKR")
+        put("timeZone", occurrence.timeZone.id)
+        put("sourceId", requireNotNull(occurrence.sourceId).also(::checkId))
+        put("state", occurrence.state.name)
+        put("createdAt", occurrence.metadata.createdAt?.let(::timestamp) ?: FieldValue.serverTimestamp())
+        put("updatedAt", FieldValue.serverTimestamp())
+        put("revision", occurrence.metadata.revision)
+        occurrence.snoozedUntil?.let { put("snoozedUntil", timestamp(it)) }
+        occurrence.confirmedTransactionId?.let { put("confirmedTransactionId", it) }
+        occurrence.confirmedAmount?.let { put("confirmedAmountMinor", it.money.minor) }
+    }
+
+    fun incomeReminderOccurrence(id: String, data: FirestoreFields): Occurrence {
+        data.checkKeys(setOf(
+            "scheduleId", "nominalDate", "effectiveDueDate", "kind", "titleSnapshot", "expectedAmountMinor",
+            "currencyCode", "timeZone", "sourceId", "state", "createdAt", "updatedAt", "revision",
+        ), setOf("snoozedUntil", "confirmedTransactionId", "confirmedAmountMinor"))
+        require(data.text("kind") == "INCOME_REMINDER" && data.text("currencyCode") == "LKR")
+        require(data.text("timeZone") == "Asia/Colombo")
+        val state = OccurrenceState.valueOf(data.text("state"))
+        require(state in setOf(OccurrenceState.OPEN, OccurrenceState.SKIPPED, OccurrenceState.CONFIRMED))
+        val occurrence = Occurrence(
+            scheduleId = data.text("scheduleId").also(::checkId),
+            nominalDate = LocalDate.parse(data.text("nominalDate")),
+            effectiveDueDate = LocalDate.parse(data.text("effectiveDueDate")),
+            kind = ScheduleKind.INCOME_REMINDER,
+            titleSnapshot = data.text("titleSnapshot"),
+            expectedAmount = EntryAmount(Money.lkr(data.integer("expectedAmountMinor"))),
+            timeZone = ZoneId.of(data.text("timeZone")),
+            sourceId = data.text("sourceId").also(::checkId),
+            state = state,
+            snoozedUntil = data.optionalInstant("snoozedUntil"),
+            confirmedTransactionId = data.optionalText("confirmedTransactionId"),
+            confirmedAmount = data.optionalInteger("confirmedAmountMinor")?.let { EntryAmount(Money.lkr(it)) },
+            metadata = RecordMetadata(
+                createdAt = data.instant("createdAt"), updatedAt = data.instant("updatedAt"),
+                revision = data.integer("revision"),
+            ),
+        )
+        require(occurrence.id == id && (state == OccurrenceState.OPEN || occurrence.snoozedUntil == null))
+        require(state != OccurrenceState.CONFIRMED || (
+            occurrence.confirmedTransactionId == StableIds.scheduledReceipt(id) && occurrence.confirmedAmount != null
+        ))
+        return occurrence
+    }
+
     fun firstMonthlyBillData(schedule: Schedule): Pair<Map<String, Any>, Map<String, Any>> {
         checkId(schedule.id)
         val categoryId = requireNotNull(schedule.categoryId).also(::checkId)

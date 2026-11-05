@@ -57,6 +57,13 @@ object IncomeOccurrenceTransitions {
         ))
     }
 
+    fun reopen(occurrence: Occurrence, expectedRevision: Long): Decision {
+        if (!isIncome(occurrence)) return Decision.InvalidState
+        if (occurrence.metadata.revision != expectedRevision) return Decision.StaleRevision
+        if (occurrence.state != OccurrenceState.SKIPPED) return Decision.InvalidState
+        return Decision.Apply(occurrence.copy(state = OccurrenceState.OPEN, metadata = nextMetadata(occurrence)))
+    }
+
     fun snooze(occurrence: Occurrence, expectedRevision: Long, until: Instant): Decision {
         if (!isIncome(occurrence)) return Decision.InvalidState
         if (occurrence.metadata.revision != expectedRevision) {

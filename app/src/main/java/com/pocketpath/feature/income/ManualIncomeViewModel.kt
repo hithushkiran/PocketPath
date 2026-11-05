@@ -7,6 +7,7 @@ import com.pocketpath.data.repository.FirebaseIncomeRepositoryFactory
 import com.pocketpath.domain.model.Account
 import com.pocketpath.domain.model.FinancialTransaction
 import com.pocketpath.domain.model.IncomeSource
+import com.pocketpath.domain.model.IncomeSourceKind
 import com.pocketpath.domain.repository.AuthRepository
 import com.pocketpath.domain.repository.AuthSession
 import com.pocketpath.domain.repository.CommandResult
@@ -107,9 +108,19 @@ class ManualIncomeViewModel @Inject constructor(
     fun onEvent(expectedUserId: String, event: ManualIncomeEvent) {
         if (expectedUserId != activeUserId || expectedUserId != _state.value.userId) return
         when (event) {
-            is ManualIncomeEvent.SourceChanged -> edit { it.copy(sourceId = event.id) }
+            is ManualIncomeEvent.SourceChanged -> edit { current ->
+                val supportsUsd = current.selectableSources.any { it.id == event.id && it.kind == IncomeSourceKind.ADSENSE }
+                if (current.convertedUsd && !supportsUsd) {
+                    current.copy(sourceId = event.id, convertedUsd = false, amount = "", usdRate = "")
+                } else current.copy(sourceId = event.id)
+            }
             is ManualIncomeEvent.AccountChanged -> edit { it.copy(accountId = event.id) }
             is ManualIncomeEvent.AmountChanged -> edit { it.copy(amount = event.value) }
+            is ManualIncomeEvent.ConvertedUsdChanged -> edit {
+                if (event.enabled == it.convertedUsd || (event.enabled && !it.canRecordConvertedUsd)) it
+                else it.copy(convertedUsd = event.enabled, amount = "", usdRate = "")
+            }
+            is ManualIncomeEvent.UsdRateChanged -> edit { it.copy(usdRate = event.value) }
             is ManualIncomeEvent.DateChanged -> edit { it.copy(date = event.value) }
             is ManualIncomeEvent.NoteChanged -> edit { it.copy(note = event.value) }
             ManualIncomeEvent.Save -> save()
@@ -148,6 +159,9 @@ class ManualIncomeViewModel @Inject constructor(
                     error = failure?.message ?: old.error,
                 )
             } else {
+                val selectedSource = selectableSources.firstOrNull { it.id == old.sourceId }
+                    ?: selectableSources.firstOrNull()
+                val keepUsd = old.convertedUsd && selectedSource?.kind == IncomeSourceKind.ADSENSE
                 old.copy(
                     loading = accounts is Observation.Loading || sources is Observation.Loading,
                     referencesReady = accountData != null && sourceData != null,
@@ -155,8 +169,10 @@ class ManualIncomeViewModel @Inject constructor(
                     sources = availableSources,
                     accountId = old.accountId?.takeIf { id -> selectableAccounts.any { it.id == id } }
                         ?: selectableAccounts.firstOrNull()?.id,
-                    sourceId = old.sourceId?.takeIf { id -> selectableSources.any { it.id == id } }
-                        ?: selectableSources.firstOrNull()?.id,
+                    sourceId = selectedSource?.id,
+                    convertedUsd = keepUsd,
+                    amount = if (old.convertedUsd && !keepUsd) "" else old.amount,
+                    usdRate = if (keepUsd) old.usdRate else "",
                     error = failure?.message,
                 )
             }
@@ -187,6 +203,7 @@ class ManualIncomeViewModel @Inject constructor(
                 now = Instant.now(),
                 accounts = current.accounts,
                 sources = current.sources,
+                usdRateText = current.usdRate.takeIf { current.convertedUsd },
             )
         } catch (error: Exception) {
             _state.update { it.copy(error = error.message ?: "Enter valid income details.") }
@@ -244,6 +261,7 @@ class ManualIncomeViewModel @Inject constructor(
         _state.update {
             it.copy(
                 amount = "",
+                usdRate = "",
                 date = today(),
                 note = "",
                 busy = false,

@@ -610,3 +610,298 @@ test('goal contribution and backing revision must commit together under one owne
   assert.equal(backing.openingTransactionId, 'opening-bank');
   assert.equal(backing.lastGoalReserveId, reservation.operationId);
 });
+
+async function createAdSenseSource() {
+  await assertSucceeds(setDoc(doc(db, root, 'incomeSources', 'adsense'), {
+    name: 'AdSense', kind: 'ADSENSE', defaultCurrencyCode: 'LKR',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0,
+  }));
+}
+
+function convertedUsdEvent(id, credit = 301, overrides = {}) {
+  const receipt = event(id, 'INCOME', credit);
+  return {
+    ...receipt,
+    incomeSourceIds: ['adsense'],
+    components: [{
+      ...receipt.components[0],
+      incomeSourceId: 'adsense',
+      originalCurrency: 'USD', originalAmountMinor: 1,
+      valuationRate: '300.500000', rateSource: 'MANUAL_ACTUAL',
+      ...overrides,
+    }],
+  };
+}
+
+test('converted AdSense receipt credits only correctly rounded LKR and retains immutable USD details', async () => {
+  await createAdSenseSource();
+  const ref = eventRef('converted-adsense');
+  await assertSucceeds(setDoc(ref, convertedUsdEvent(ref.id)));
+  const saved = (await getDoc(ref)).data();
+  assert.equal(saved.movements.length, 1);
+  assert.equal(saved.movements[0].currencyCode, 'LKR');
+  assert.equal(saved.movements[0].amountMinor, 301);
+  assert.equal(saved.components[0].originalAmountMinor, 1);
+  assert.equal(saved.components[0].valuationRate, '300.500000');
+  assert.equal(saved.components[0].rateSource, 'MANUAL_ACTUAL');
+  await assertFails(updateDoc(ref, { components: convertedUsdEvent(ref.id, 301, { valuationRate: '300.600000' }).components }));
+});
+
+test('USD metadata cannot bypass source, ownership, precision, credit or receipt-link checks', async () => {
+  await createAdSenseSource();
+  const receipt = convertedUsdEvent('rejected-conversion');
+  const component = receipt.components[0];
+  const { rateSource, ...partial } = component;
+  for (const invalid of [
+    convertedUsdEvent(receipt.operationId, 300),
+    { ...receipt, components: [partial] },
+    { ...receipt, incomeSourceIds: ['source'], components: [{ ...component, incomeSourceId: 'source' }] },
+    convertedUsdEvent(receipt.operationId, 301, { valuationRate: '300.5000001' }),
+    convertedUsdEvent(receipt.operationId, 301, { valuationRate: '0300.500000' }),
+    convertedUsdEvent(receipt.operationId, 301, { valuationRate: '9999.999999', originalAmountMinor: 100_000_000_000 }),
+    { ...receipt, expectedPaymentId: 'payment' },
+  ]) {
+    await assertFails(setDoc(eventRef(receipt.operationId), invalid));
+  }
+  const other = environment.authenticatedContext('other-user').firestore();
+  await assertFails(setDoc(eventRef(receipt.operationId, other), receipt));
+  assert.equal((await getDoc(eventRef(receipt.operationId))).exists(), false);
+  assert.equal((await getDoc(paymentRef())).data().receivedAmountMinor, 0);
+});
+
+const walletId = 'wallet-ETH';
+const walletOpeningId = 'opening-wallet-ETH';
+const positionRef = (client = db) => doc(client, root, 'cryptoPositions', walletId);
+const ethMovement = (quantityAtomic) => ({
+  accountId: walletId, currencyCode: 'ETH', assetClass: 'CRYPTO', scale: 8, quantityAtomic,
+});
+
+function createEthWallet(quantity = '0') {
+  const batch = writeBatch(db);
+  batch.set(doc(db, root, 'accounts', walletId), {
+    ...account(walletId, walletOpeningId), type: 'CRYPTO_WALLET', currencyCode: 'ETH', assetClass: 'CRYPTO',
+    scale: 8, includeInEverydayPool: false,
+  });
+  batch.set(eventRef(walletOpeningId), {
+    ...event(walletOpeningId, 'OPENING', 0, walletId), movements: [ethMovement(quantity)],
+  });
+  return batch.commit();
+}
+
+function cryptoEvent(id, kind, quantity, gross, fee, allocated) {
+  const sell = kind === 'CRYPTO_SELL';
+  const realized = sell ? gross - fee - allocated : null;
+  return {
+    ...event(id, kind), accountIds: ['bank', walletId], categoryIds: fee > 0 ? ['food'] : [],
+    movements: [
+      ethMovement(String(sell ? -quantity : quantity)),
+      { accountId: 'bank', assetClass: 'FIAT', currencyCode: 'LKR', amountMinor: (sell ? gross : -gross) - fee },
+    ],
+    components: [
+      ...(fee > 0 ? [{
+        nature: 'SPENDING', amountLkrMinor: fee, categoryId: 'food', commitmentClass: 'DISCRETIONARY',
+      }] : []),
+      ...(sell ? [{ nature: 'REALIZED_CRYPTO', amountLkrMinor: realized }] : []),
+    ],
+    cryptoTrade: {
+      assetAccountId: walletId, quoteAccountId: 'bank', quantityAtomic: String(quantity),
+      grossQuoteMinor: gross, feeLkrMinor: fee, costMethod: 'MOVING_AVERAGE_V1',
+      ...(sell ? { allocatedCostLkrMinor: allocated, realizedPnlLkrMinor: realized } : {}),
+    },
+  };
+}
+
+function cryptoPosition(id, quantity, cost, version) {
+  return {
+    currencyCode: 'ETH', scale: 8, quantityAtomic: String(quantity), costLkrMinor: cost,
+    lastTransactionId: id, version, costMethod: 'MOVING_AVERAGE_V1', lastTradeAt: audit, updatedAt: serverTimestamp(),
+  };
+}
+
+function cryptoBatch(trade, position, client = db) {
+  const batch = writeBatch(client);
+  batch.set(eventRef(trade.operationId, client), trade);
+  batch.set(positionRef(client), position);
+  return batch.commit();
+}
+
+test('crypto buy, partial sale and full disposal preserve exact holdings and cash', async () => {
+  await assertSucceeds(createEthWallet());
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('buy', 'CRYPTO_BUY', 200_000_000, 10_000_000, 100_000),
+    cryptoPosition('buy', 200_000_000, 10_100_000, 1),
+  ));
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('sell', 'CRYPTO_SELL', 50_000_000, 3_000_000, 50_000, 2_525_000),
+    cryptoPosition('sell', 150_000_000, 7_575_000, 2),
+  ));
+  const sold = (await assertSucceeds(getDoc(eventRef('sell')))).data();
+  assert.equal(sold.cryptoTrade.realizedPnlLkrMinor, 425_000);
+  assert.equal(sold.movements[1].amountMinor, 2_950_000);
+  assert.equal((await assertSucceeds(getDoc(positionRef()))).data().quantityAtomic, '150000000');
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('close', 'CRYPTO_SELL', 150_000_000, 7_000_000, 0, 7_575_000),
+    cryptoPosition('close', 0, 0, 3),
+  ));
+});
+
+test('crypto rules reject an unpaired trade, a nonzero opening, forged cost and stale versions', async () => {
+  await assertFails(createEthWallet('1'));
+  await assertSucceeds(createEthWallet());
+  const buy = cryptoEvent('buy', 'CRYPTO_BUY', 200_000_000, 10_000_000, 100_000);
+  const opened = cryptoPosition('buy', 200_000_000, 10_100_000, 1);
+  await assertFails(setDoc(eventRef('buy'), buy));
+  await assertFails(setDoc(positionRef(), opened));
+  const other = environment.authenticatedContext('other').firestore();
+  await assertFails(cryptoBatch(buy, opened, other));
+  await assertSucceeds(cryptoBatch(buy, opened));
+  await assertFails(cryptoBatch(
+    cryptoEvent('forged', 'CRYPTO_SELL', 50_000_000, 3_000_000, 50_000, 2_524_999),
+    cryptoPosition('forged', 150_000_000, 7_575_001, 2),
+  ));
+  await assertFails(cryptoBatch(
+    cryptoEvent('oversell', 'CRYPTO_SELL', 200_000_001, 3_000_000, 0, 10_100_000),
+    cryptoPosition('oversell', -1, 0, 2),
+  ));
+  await assertFails(cryptoBatch(
+    cryptoEvent('stale', 'CRYPTO_SELL', 50_000_000, 3_000_000, 50_000, 2_525_000),
+    cryptoPosition('stale', 150_000_000, 7_575_000, 1),
+  ));
+  const unchanged = (await assertSucceeds(getDoc(positionRef()))).data();
+  assert.equal(unchanged.lastTransactionId, 'buy');
+  assert.equal(unchanged.costLkrMinor, 10_100_000);
+});
+
+test('crypto allocation rounds an exact half minor unit upward', async () => {
+  await assertSucceeds(createEthWallet());
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('buy', 'CRYPTO_BUY', 999_999_999_998, 100_000_000_000 - 1, 0),
+    cryptoPosition('buy', 999_999_999_998, 100_000_000_000 - 1, 1),
+  ));
+  const sold = 499_999_999_999;
+  await assertFails(cryptoBatch(
+    cryptoEvent('wrong', 'CRYPTO_SELL', sold, 30_000, 0, 49_999_999_999),
+    cryptoPosition('wrong', sold, 50_000_000_000, 2),
+  ));
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('rounded', 'CRYPTO_SELL', sold, 30_000, 0, 50_000_000_000),
+    cryptoPosition('rounded', sold, 49_999_999_999, 2),
+  ));
+});
+
+const reminderRef = (id = 'salary', client = db) => doc(client, root, 'schedules', id);
+const reminderOccurrenceRef = (id, client = db) => doc(client, root, 'occurrences', id);
+
+function incomeReminder(frequency = 'MONTHLY', anchorDate = date) {
+  return {
+    kind: 'INCOME_REMINDER', title: 'Salary', frequency, interval: 1, anchorDate, activeFrom: anchorDate,
+    timeZone: 'Asia/Colombo', expectedAmountMinor: 12_000_000, currencyCode: 'LKR', amountMode: 'ESTIMATE',
+    incomeSourceId: 'source', preferredAccountId: 'bank', paused: false, reminderLeadDays: 0,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0,
+  };
+}
+
+function reminderOccurrence(nominalDate = date, scheduleId = 'salary') {
+  return {
+    scheduleId, nominalDate, effectiveDueDate: nominalDate, kind: 'INCOME_REMINDER', titleSnapshot: 'Salary',
+    expectedAmountMinor: 12_000_000, currencyCode: 'LKR', timeZone: 'Asia/Colombo', sourceId: 'source',
+    state: 'OPEN', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0,
+  };
+}
+
+function scheduledIncome(id, amount = 13_500_000, accountId = 'bank') {
+  const receiptId = `receipt_${id}`;
+  return { ...event(receiptId, 'INCOME', amount, accountId), occurrenceId: id };
+}
+
+test('recurring income creates a deterministic receipt and occurrence together on first confirmation', async () => {
+  const id = `salary_${date}`;
+  const receipt = scheduledIncome(id);
+  const confirmed = {
+    ...reminderOccurrence(), state: 'CONFIRMED', confirmedTransactionId: receipt.operationId,
+    confirmedAmountMinor: 13_500_000,
+  };
+  await assertSucceeds(setDoc(reminderRef(), incomeReminder()));
+  await assertFails(setDoc(eventRef(receipt.operationId), receipt));
+  await assertFails(setDoc(reminderOccurrenceRef(id), confirmed));
+  const batch = writeBatch(db);
+  batch.set(eventRef(receipt.operationId), receipt);
+  batch.set(reminderOccurrenceRef(id), confirmed);
+  await assertSucceeds(batch.commit());
+  const saved = (await getDoc(reminderOccurrenceRef(id))).data();
+  assert.equal(saved.state, 'CONFIRMED');
+  assert.equal(saved.expectedAmountMinor, 12_000_000);
+  assert.equal(saved.confirmedAmountMinor, 13_500_000);
+  assert.equal((await getDoc(eventRef(receipt.operationId))).data().movements[0].amountMinor, 13_500_000);
+  await assertFails(setDoc(eventRef(receipt.operationId), receipt));
+});
+
+test('recurring income adjustment and snooze do not post money and an adjusted prompt can be confirmed', async () => {
+  const id = `salary_${date}`;
+  const ref = reminderOccurrenceRef(id);
+  const receipt = scheduledIncome(id, 12_900_000);
+  await assertSucceeds(setDoc(reminderRef(), incomeReminder('WEEKLY')));
+  await assertSucceeds(setDoc(ref, {
+    ...reminderOccurrence(), expectedAmountMinor: 12_900_000, effectiveDueDate: '2026-11-06',
+  }));
+  await assertSucceeds(updateDoc(ref, {
+    snoozedUntil: Timestamp.fromMillis(Date.now() + 86_400_000), updatedAt: serverTimestamp(), revision: 1,
+  }));
+  assert.equal((await getDoc(eventRef(receipt.operationId))).exists(), false);
+  const patch = {
+    state: 'CONFIRMED', confirmedTransactionId: receipt.operationId, confirmedAmountMinor: 12_900_000,
+    snoozedUntil: deleteField(), updatedAt: serverTimestamp(), revision: 2,
+  };
+  await assertFails(updateDoc(ref, patch));
+  const batch = writeBatch(db);
+  batch.set(eventRef(receipt.operationId), receipt);
+  batch.update(ref, patch);
+  await assertSucceeds(batch.commit());
+  const data = (await getDoc(ref)).data();
+  assert.equal(data.revision, 2);
+  assert.equal(data.effectiveDueDate, '2026-11-06');
+  assert.equal('snoozedUntil' in data, false);
+});
+
+test('recurring income clamps yearly dates, validates weekly dates and preserves future prompts after skip', async () => {
+  await assertSucceeds(setDoc(reminderRef('annual'), incomeReminder('YEARLY', '2024-02-29')));
+  await assertSucceeds(setDoc(reminderOccurrenceRef('annual_2025-02-28'), {
+    ...reminderOccurrence('2025-02-28', 'annual'), state: 'SKIPPED',
+  }));
+  await assertFails(setDoc(reminderOccurrenceRef('annual_2026-03-29'), reminderOccurrence('2026-03-29', 'annual')));
+  await assertSucceeds(setDoc(reminderOccurrenceRef('annual_2026-02-28'), reminderOccurrence('2026-02-28', 'annual')));
+  await assertSucceeds(setDoc(reminderRef('weekly'), incomeReminder('WEEKLY')));
+  await assertFails(setDoc(reminderOccurrenceRef('weekly_2026-11-13'), reminderOccurrence('2026-11-13', 'weekly')));
+  await assertSucceeds(setDoc(reminderOccurrenceRef('weekly_2026-11-12'), reminderOccurrence('2026-11-12', 'weekly')));
+  assert.equal((await getDoc(eventRef('receipt_annual_2025-02-28'))).exists(), false);
+  const skipped = reminderOccurrenceRef('annual_2025-02-28');
+  await assertFails(updateDoc(skipped, {
+    state: 'OPEN', expectedAmountMinor: 99, updatedAt: serverTimestamp(), revision: 1,
+  }));
+  await assertSucceeds(updateDoc(skipped, { state: 'OPEN', updatedAt: serverTimestamp(), revision: 1 }));
+  assert.equal((await getDoc(skipped)).data().state, 'OPEN');
+});
+
+test('recurring income rejects a cross-user schedule, stale revision, forged amount and competing links', async () => {
+  const id = `salary_${date}`;
+  const other = environment.authenticatedContext('other').firestore();
+  await assertFails(setDoc(reminderRef('salary', other), incomeReminder()));
+  await assertFails(setDoc(reminderRef(), { ...incomeReminder(), preferredAccountId: 'missing' }));
+  await assertSucceeds(setDoc(reminderRef(), incomeReminder()));
+  await assertSucceeds(setDoc(reminderOccurrenceRef(id), reminderOccurrence()));
+  await assertFails(updateDoc(reminderOccurrenceRef(id), {
+    expectedAmountMinor: 99, updatedAt: serverTimestamp(), revision: 0,
+  }));
+  for (const [amount, extra] of [[1, {}], [12_000_000, { expectedPaymentId: 'payment' }]]) {
+    const receipt = scheduledIncome(id, amount);
+    const batch = writeBatch(db);
+    batch.set(eventRef(receipt.operationId), { ...receipt, ...extra });
+    batch.update(reminderOccurrenceRef(id), {
+      state: 'CONFIRMED', confirmedTransactionId: receipt.operationId, confirmedAmountMinor: 12_000_000,
+      updatedAt: serverTimestamp(), revision: 1,
+    });
+    await assertFails(batch.commit());
+  }
+  assert.equal((await getDoc(reminderOccurrenceRef(id))).data().state, 'OPEN');
+  assert.equal((await getDoc(eventRef(`receipt_${id}`))).exists(), false);
+});

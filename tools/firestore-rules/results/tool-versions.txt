@@ -1,0 +1,10 @@
+v22.19.0
+10.9.3
+openjdk version "21.0.10" 2026-01-20
+OpenJDK Runtime Environment (build 21.0.10+-14961533-b1163.108)
+OpenJDK 64-Bit Server VM (build 21.0.10+-14961533-b1163.108, mixed mode)
+15.34.2
+pocketpath-pr3-firestore-rules-tests@1.0.0 C:\Users\User\Desktop\PocketPath\tools\firestore-rules
+├── @firebase/rules-unit-testing@5.0.0
+└── firebase@12.4.0
+

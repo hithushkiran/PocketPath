@@ -1,0 +1,1 @@
+npx --yes --package=firebase-tools@15.34.2 firebase emulators:exec --only firestore --project demo-pocketpath-pr3 "npm --prefix tools/firestore-rules test"

@@ -24,6 +24,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.pocketpath.domain.calculation.SavedGoalProgress
+import com.pocketpath.domain.calculation.SavingsPaceStatus
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.domain.model.Account
 import com.pocketpath.ui.components.FinanceChoice
@@ -38,7 +40,6 @@ fun GoalsScreen(
 ) {
     val editable = state.userId != null && !state.busy && !state.retryGoal
     val accounts = finance.selectableAccounts
-    val reservations = finance.goalReservationsMinor.takeIf { finance.ready }
     val preview = state.preview
 
     LazyColumn(
@@ -63,7 +64,7 @@ fun GoalsScreen(
             }
         }
         items(state.goals, key = { "goal-" + it.id }) { goal ->
-            val reserved = reservations?.let { it[goal.id] ?: 0L }
+            val progress = finance.savedGoalProgress(goal)
             Card(Modifier.fillMaxWidth()) {
                 Column(
                     modifier = Modifier.padding(16.dp),
@@ -71,11 +72,14 @@ fun GoalsScreen(
                 ) {
                     Text(goal.name, style = MaterialTheme.typography.titleLarge)
                     Text("Target ${lkrText(goal.target.money.minor)} · Due ${goal.deadline}")
-                    Text(if (reserved == null) "Confirmed progress is unavailable."
-                        else "${lkrText(reserved)} reserved · ${lkrText(maxOf(0L, goal.target.money.minor - reserved))} remaining")
+                    if (progress == null) {
+                        Text("Confirmed progress is unavailable.")
+                    } else {
+                        SavedGoalPaceDetails(progress)
+                    }
                     Button(
                         onClick = { onEvent(GoalsEvent.OpenContribution(goal.id, accounts.first().id)) },
-                        enabled = editable && state.contribution == null && accounts.isNotEmpty() && reserved != null,
+                        enabled = editable && state.contribution == null && accounts.isNotEmpty() && progress != null,
                     ) { Text("Add contribution") }
                 }
             }
@@ -182,6 +186,28 @@ fun GoalsScreen(
 
     state.contribution?.takeIf { state.showContribution }?.let { form ->
         GoalContributionDialog(form, accounts, state.busy, onEvent)
+    }
+}
+
+@Composable
+internal fun SavedGoalPaceDetails(progress: SavedGoalProgress) {
+    val pace = progress.pace
+    Text("${lkrText(progress.confirmedReservedMinor)} reserved · ${lkrText(pace.remainingLkrMinor)} remaining")
+    when (pace.status) {
+        SavingsPaceStatus.SCHEDULED -> {
+            val next = pace.installments.first()
+            val last = pace.installments.last()
+            val amount = if (next.amountLkrMinor == last.amountLkrMinor) {
+                lkrText(next.amountLkrMinor)
+            } else {
+                "${lkrText(last.amountLkrMinor)}–${lkrText(next.amountLkrMinor)}"
+            }
+            Text("Required pace: $amount per month")
+            Text("${pace.installments.size} monthly contributions left · Next ${next.date}")
+        }
+        SavingsPaceStatus.TARGET_REACHED -> Text("Savings target reached")
+        SavingsPaceStatus.REPLAN_REQUIRED -> Text("No remaining contribution dates. Review this goal’s schedule.")
+        SavingsPaceStatus.INACTIVE -> Text("This goal has no active savings schedule.")
     }
 }
 

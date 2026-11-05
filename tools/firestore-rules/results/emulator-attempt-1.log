@@ -1,0 +1,46 @@
+i  emulators: Starting emulators: firestore
+i  emulators: Detected demo project ID "demo-pocketpath-pr3", emulated services will use a demo configuration and attempts to access non-emulated services for this project will fail.
+!  It appears you are running in a CI environment. You can avoid downloading the Firestore Emulator repeatedly by caching the C:\Users\User\.cache\firebase\emulators directory.
+i  firestore: downloading cloud-firestore-emulator-v1.22.0.jar...
+
+i  firestore: Firestore Emulator logging to firestore-debug.log
++  firestore: Firestore Emulator was started in standard edition.
++  firestore: Firestore Emulator UI websocket is running on 9150.
+i  Running script: npm --prefix tools/firestore-rules test
+
+> pocketpath-pr3-firestore-rules-tests@1.0.0 test
+> node --test --test-concurrency=1 --test-reporter=spec rules.test.mjs
+
+✔ owner can read and query own expected payments and receipts (4062.8599ms)
+✔ other-user cannot read or write owner's payments/receipts (699.7934ms)
+✔ unauthenticated cannot read or write owner's payments/receipts (568.0629ms)
+✔ owner creates a codec-shaped expected payment (180.2994ms)
+✔ ordinary manual income succeeds without an expected-payment link (108.7507ms)
+✔ otherwise valid account/opening pair succeeds (94.4843ms)
+✔ otherwise valid opening rejects an expected-payment link atomically (124.0485ms)
+✔ otherwise valid ordinary expense succeeds (61.198ms)
+✔ otherwise valid expense rejects an expected-payment link (102.5402ms)
+✔ partial receipt and matching payment update succeed together (120.1341ms)
+✔ receipt write alone is denied with no partial state (125.4632ms)
+✔ payment receipt-update alone is denied with no partial state (109.7839ms)
+✔ overpayment pair is denied and preserves the preceding partial receipt (183.059ms)
+✔ receipt after cancellation is denied without changing the cancellation (129.1226ms)
+✔ second write to a receipt ID and deletion cannot change prior totals (313.4554ms)
+✔ valid cancellation succeeds and preserves the received counter (93.9074ms)
+✔ revision rollback during cancellation is denied (125.1133ms)
+✔ reactivation of a cancelled payment is denied (109.1202ms)
+✔ owner cannot delete an expected payment (92.7162ms)
+ℹ tests 19
+ℹ suites 0
+ℹ pass 19
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 8023.9727
++  Script exited successfully (code 0)
+i  emulators: Shutting down emulators.
+i  firestore: Stopping Firestore Emulator
+!  Firestore Emulator has exited upon receiving signal: SIGINT
+i  hub: Stopping emulator hub
+i  logging: Stopping Logging Emulator

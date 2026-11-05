@@ -5,6 +5,8 @@ import com.pocketpath.domain.calculation.BalanceUnits
 import com.pocketpath.domain.calculation.FundsPlanningResult
 import com.pocketpath.domain.calculation.HomeLedgerSummary
 import com.pocketpath.domain.calculation.PurchaseImpactPreview
+import com.pocketpath.domain.calculation.SavedGoalProgress
+import com.pocketpath.domain.calculation.calculateSavedGoalProgress
 import com.pocketpath.domain.calculation.previewPurchaseImpact
 import com.pocketpath.domain.calculation.recordedHomeFunds
 import com.pocketpath.domain.calculation.BudgetProgress
@@ -14,8 +16,14 @@ import com.pocketpath.domain.model.Budget
 import com.pocketpath.domain.model.BudgetPeriod
 import com.pocketpath.domain.model.BudgetScope
 import com.pocketpath.domain.model.Category
+import com.pocketpath.domain.model.CryptoPosition
+import com.pocketpath.domain.model.TransactionKind
+import com.pocketpath.domain.money.CryptoAsset
+import com.pocketpath.domain.calculation.manualCryptoAssets
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
+import com.pocketpath.domain.model.Goal
+import com.pocketpath.domain.model.GoalState
 import com.pocketpath.domain.model.MonthlyBill
 import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.FiatCurrency
@@ -131,6 +139,33 @@ data class HomePurchaseResult(
     val reservedInAccountMinor: Long,
 )
 
+data class CryptoUiState(
+    val positions: Map<String, CryptoPosition> = emptyMap(),
+    val loading: Boolean = true,
+    val cached: Boolean = false,
+    val positionsError: String? = null,
+    val assetCode: String? = null,
+    val trade: CryptoTradeForm = CryptoTradeForm(),
+    val busy: Boolean = false,
+    val retryWallet: Boolean = false,
+    val retryTrade: Boolean = false,
+    val message: String? = null,
+    val error: String? = null,
+) {
+    val hasUnresolvedWrite: Boolean
+        get() = busy || retryWallet || retryTrade
+}
+
+data class CryptoTradeForm(
+    val kind: TransactionKind = TransactionKind.CRYPTO_BUY,
+    val walletId: String? = null,
+    val quoteAccountId: String? = null,
+    val quantity: String = "",
+    val gross: String = "",
+    val fee: String = "",
+    val date: String = "",
+)
+
 data class FinanceUiState(
     val userId: String? = null,
     val loading: Boolean = true,
@@ -145,6 +180,7 @@ data class FinanceUiState(
     val balances: Map<String, AccountBalance> = emptyMap(),
     val poolBalanceMinor: Long? = null,
     val goalReservationsMinor: Map<String, Long>? = null,
+    val crypto: CryptoUiState = CryptoUiState(),
     val homeLedger: HomeLedgerSummary? = null,
     val purchaseForm: PurchasePreviewForm? = null,
     val accountForm: CashAccountForm = CashAccountForm(),
@@ -207,6 +243,25 @@ data class FinanceUiState(
     val ready: Boolean
         get() = userId != null && !loading && error == null
 
+    fun savedGoalProgress(goal: Goal): SavedGoalProgress? {
+        if (!ready) return null
+        val ledger = homeLedger ?: return null
+        val reservations = goalReservationsMinor ?: return null
+        val reserved = reservations[goal.id] ?: 0L
+        if (reserved < 0L) return null
+        return calculateSavedGoalProgress(goal, reserved, ledger.date)
+    }
+
+    fun featuredGoalProgress(goals: List<Goal>): SavedGoalProgress? {
+        val reservations = goalReservationsMinor ?: return null
+        val goal = goals.asSequence()
+            .filter { it.state == GoalState.ACTIVE }
+            .minWithOrNull(compareBy<Goal> { (reservations[it.id] ?: 0L) >= it.target.money.minor }
+                .thenBy(Goal::deadline).thenBy(Goal::id))
+            ?: return null
+        return savedGoalProgress(goal)
+    }
+
     val homeFunds: FundsPlanningResult.Ready?
         get() {
             val ledger = homeLedger ?: return null
@@ -243,11 +298,35 @@ data class FinanceUiState(
             it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null
         }
 
+    val cryptoWallets: List<Account>
+        get() = accounts.filter { it.asset is CryptoAsset && it.metadata.archivedAt == null }
+
+    val availableCryptoAssets: List<CryptoAsset>
+        get() = manualCryptoAssets.filter { asset -> cryptoWallets.none { it.asset == asset } }
+
+    val selectedCryptoWallet: Account?
+        get() = cryptoWallets.firstOrNull { it.id == crypto.trade.walletId } ?: cryptoWallets.firstOrNull()
+
+    val selectedCryptoQuoteAccount: Account?
+        get() = selectableAccounts.firstOrNull { it.id == crypto.trade.quoteAccountId } ?: selectableAccounts.firstOrNull()
+
     val selectableCategories: List<Category>
         get() = categories.filter { it.metadata.archivedAt == null }
 }
 
 sealed interface FinanceEvent {
+    data class SelectCryptoAsset(val code: String) : FinanceEvent
+    data object CreateCryptoWallet : FinanceEvent
+    data class EditCryptoTrade(
+        val kind: TransactionKind? = null,
+        val walletId: String? = null,
+        val quoteAccountId: String? = null,
+        val quantity: String? = null,
+        val gross: String? = null,
+        val fee: String? = null,
+        val date: String? = null,
+    ) : FinanceEvent
+    data object SaveCryptoTrade : FinanceEvent
     data object ClearExpenseDraft : FinanceEvent
     data class ReviewRejectedExpense(val operationId: String) : FinanceEvent
     data object RetryConnection : FinanceEvent

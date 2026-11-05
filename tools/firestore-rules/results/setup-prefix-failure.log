@@ -1,0 +1,42 @@
+0 verbose cli C:\Program Files\nodejs\node.exe C:\Program Files\nodejs\node_modules\npm\bin\npm-cli.js
+1 info using npm@10.9.3
+2 info using node@v22.19.0
+3 silly config load:file:C:\Program Files\nodejs\node_modules\npm\npmrc
+4 silly config load:file:C:\Users\User\Desktop\PocketPath\tools\firestore-rules\.npmrc
+5 silly config load:file:C:\Users\User\.npmrc
+6 silly config load:file:C:\Users\User\Desktop\PocketPath\tools\firestore-rules\etc\npmrc
+7 verbose title npm install
+8 verbose argv "install" "--prefix" "tools/firestore-rules" "--ignore-scripts" "--no-audit" "--no-fund"
+9 verbose logfile logs-max:10 dir:C:\Users\User\AppData\Local\npm-cache\_logs\2026-11-05T04_59_21_136Z-
+10 verbose logfile C:\Users\User\AppData\Local\npm-cache\_logs\2026-11-05T04_59_21_136Z-debug-0.log
+11 silly logfile start cleaning logs, removing 1 files
+12 silly packumentCache heap:4345298944 maxSize:1086324736 maxEntrySize:543162368
+13 silly logfile done cleaning log files
+14 verbose stack Error: Could not read package.json: Error: ENOENT: no such file or directory, open 'C:\Users\User\Desktop\PocketPath\package.json'
+14 verbose stack     at async open (node:internal/fs/promises:641:25)
+14 verbose stack     at async readFile (node:internal/fs/promises:1245:14)
+14 verbose stack     at async read (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\package-json\lib\read-package.js:9:18)
+14 verbose stack     at async PackageJson.load (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\package-json\lib\index.js:132:31)
+14 verbose stack     at async PackageJson.normalize (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\package-json\lib\index.js:118:5)
+14 verbose stack     at async C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\arborist\build-ideal-tree.js:515:22
+14 verbose stack     at async Promise.all (index 0)
+14 verbose stack     at async #add (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\arborist\build-ideal-tree.js:504:5)
+14 verbose stack     at async #applyUserRequestsToNode (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\arborist\build-ideal-tree.js:473:7)
+14 verbose stack     at async #applyUserRequests (C:\Program Files\nodejs\node_modules\npm\node_modules\@npmcli\arborist\lib\arborist\build-ideal-tree.js:408:7)
+15 error code ENOENT
+16 error syscall open
+17 error path C:\Users\User\Desktop\PocketPath\package.json
+18 error errno -4058
+19 error enoent Could not read package.json: Error: ENOENT: no such file or directory, open 'C:\Users\User\Desktop\PocketPath\package.json'
+20 error enoent This is related to npm not being able to find a file.
+20 error enoent
+21 silly unfinished npm timer reify 1793854762230
+22 silly unfinished npm timer reify:loadTrees 1793854762231
+23 silly unfinished npm timer idealTree:userRequests 1793854762243
+24 verbose cwd C:\Users\User\Desktop\PocketPath
+25 verbose os Windows_NT 10.0.26200
+26 verbose node v22.19.0
+27 verbose npm  v10.9.3
+28 verbose exit -4058
+29 verbose code -4058
+30 error A complete log of this run can be found in: C:\Users\User\AppData\Local\npm-cache\_logs\2026-11-05T04_59_21_136Z-debug-0.log

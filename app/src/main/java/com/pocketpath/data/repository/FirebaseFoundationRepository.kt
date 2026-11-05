@@ -10,12 +10,19 @@ import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.QuerySnapshot
 import com.google.firebase.firestore.Source
+import com.google.firebase.firestore.Transaction
 import com.pocketpath.data.firebase.FoundationCodec
 import com.pocketpath.data.firebase.UserCollection
 import com.pocketpath.data.firebase.UserFirestoreScope
 import com.pocketpath.domain.calculation.AccountBalance
+import com.pocketpath.domain.calculation.CRYPTO_FEE_CATEGORY_ID
+import com.pocketpath.domain.calculation.ManualCryptoTrade
+import com.pocketpath.domain.calculation.planManualCryptoTrade
 import com.pocketpath.domain.calculation.BalanceUnits
 import com.pocketpath.domain.calculation.OccurrenceCalculator
+import com.pocketpath.domain.calculation.IncomeOccurrenceTransitions
+import com.pocketpath.domain.calculation.IncomeReminderAction
+import com.pocketpath.domain.calculation.scheduledIncomeReceipt
 import com.pocketpath.domain.calculation.accountBalance
 import com.pocketpath.domain.model.*
 import com.pocketpath.domain.money.*
@@ -32,6 +39,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+import java.math.BigInteger
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
@@ -287,6 +295,156 @@ class FirebaseFoundationRepository internal constructor(
             writeState = WriteState.CLOUD_CONFIRMED,
             replayed = result.replayed,
         )
+    }
+
+    fun observeIncomeReminderSchedules(): Flow<Observation<List<Schedule>>> = observeQuery(
+        query = {
+            owned.collection(UserCollection.SCHEDULES)
+                .whereEqualTo("kind", ScheduleKind.INCOME_REMINDER.name).limit(5001)
+        },
+        completeHistory = false,
+        coverageKey = "income-reminder-schedules-v1",
+    ) { snapshot ->
+        checkLimit(snapshot)
+        snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
+            .map { FoundationCodec.incomeReminderSchedule(it.id, requireNotNull(it.data)) }
+    }
+
+    fun observeIncomeReminderOccurrences(): Flow<Observation<List<Occurrence>>> = observeQuery(
+        query = {
+            owned.collection(UserCollection.OCCURRENCES)
+                .whereEqualTo("kind", ScheduleKind.INCOME_REMINDER.name).limit(5001)
+        },
+        completeHistory = false,
+        coverageKey = "income-reminder-occurrences-v1",
+    ) { snapshot ->
+        checkLimit(snapshot)
+        snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
+            .map { FoundationCodec.incomeReminderOccurrence(it.id, requireNotNull(it.data)) }
+    }
+
+    suspend fun saveIncomeReminderSchedule(schedule: Schedule): CommandResult<Unit> = command(schedule.id) {
+        val data = FoundationCodec.incomeReminderScheduleData(schedule)
+        val reference = owned.collection(UserCollection.SCHEDULES).document(schedule.id)
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val existing = transaction.get(reference)
+            if (existing.exists()) {
+                val auditFields = setOf("createdAt", "updatedAt")
+                if (existing.data?.filterKeys { it !in auditFields } != data.filterKeys { it !in auditFields }) {
+                    throw conflict()
+                }
+                true
+            } else {
+                requireIncomeReminderReferences(transaction, schedule)
+                transaction.set(reference, data)
+                false
+            }
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
+    suspend fun actOnIncomeReminder(
+        scheduleId: String,
+        nominalDate: LocalDate,
+        expectedRevision: Long?,
+        action: IncomeReminderAction,
+    ): CommandResult<Unit> = command(StableIds.occurrence(scheduleId, nominalDate)) {
+        FoundationCodec.checkId(scheduleId)
+        val id = StableIds.occurrence(scheduleId, nominalDate)
+        val scheduleRef = owned.collection(UserCollection.SCHEDULES).document(scheduleId)
+        val occurrenceRef = owned.collection(UserCollection.OCCURRENCES).document(id)
+        val receiptRef = transactions.document(StableIds.scheduledReceipt(id))
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val schedule = FoundationCodec.incomeReminderSchedule(
+                scheduleId, requireNotNull(transaction.get(scheduleRef).data) { "Reminder schedule was not found." },
+            )
+            val stored = transaction.get(occurrenceRef).data
+                ?.let { FoundationCodec.incomeReminderOccurrence(id, it) }
+            val current = stored ?: requireNotNull(
+                OccurrenceCalculator.incomeReminderOccurrences(schedule, nominalDate, nominalDate).singleOrNull(),
+            ) { "The date does not belong to this schedule." }
+
+            val receipt = if (action is IncomeReminderAction.Confirm) {
+                require(action.receivedOn.year in 1..9999 && action.receivedOn <= LocalDate.now(schedule.timeZone)) {
+                    "Use today or an earlier receipt date."
+                }
+                val requested = FoundationCodec.eventData(scheduledIncomeReceipt(schedule, current, action))
+                val existing = transaction.get(receiptRef)
+                if (existing.exists()) {
+                    val data = requireNotNull(existing.data)
+                    val replay = requested + ("clientCreatedAt" to requireNotNull(data["clientCreatedAt"]))
+                    if (current.confirmedTransactionId != receiptRef.id || !FoundationCodec.sameEvent(data, replay)) {
+                        throw conflict()
+                    }
+                    return@runTransaction true
+                }
+                requireIncomeReminderReferences(transaction, schedule)
+                requested
+            } else null
+
+            val revision = stored?.metadata?.revision
+            if (revision != expectedRevision) {
+                val alreadyApplied = when (action) {
+                    is IncomeReminderAction.Adjust -> current.state == OccurrenceState.OPEN &&
+                        current.expectedAmount == action.amount && current.effectiveDueDate == action.dueOn &&
+                        current.snoozedUntil == null
+                    is IncomeReminderAction.Snooze -> current.state == OccurrenceState.OPEN &&
+                        current.snoozedUntil == FoundationCodec.storedInstant(action.until)
+                    IncomeReminderAction.Skip -> current.state == OccurrenceState.SKIPPED
+                    IncomeReminderAction.Reopen -> current.state == OccurrenceState.OPEN &&
+                        revision != null && expectedRevision != null && revision - expectedRevision == 1L
+                    is IncomeReminderAction.Confirm -> false
+                }
+                if (alreadyApplied) return@runTransaction true
+                throw FoundationProblem(FailureCode.CONFLICT, "This reminder changed. Refresh and review it.")
+            }
+            val requiredState = if (action == IncomeReminderAction.Reopen) OccurrenceState.SKIPPED else OccurrenceState.OPEN
+            if (current.state != requiredState) {
+                throw FoundationProblem(FailureCode.CONFLICT, "This reminder can no longer be changed with that action.")
+            }
+
+            val decision = when (action) {
+                is IncomeReminderAction.Adjust -> IncomeOccurrenceTransitions.adjust(
+                    current, current.metadata.revision, action.amount, action.dueOn,
+                )
+                is IncomeReminderAction.Snooze -> IncomeOccurrenceTransitions.snooze(
+                    current, current.metadata.revision, FoundationCodec.storedInstant(action.until),
+                )
+                IncomeReminderAction.Skip -> IncomeOccurrenceTransitions.skip(current, current.metadata.revision)
+                IncomeReminderAction.Reopen -> IncomeOccurrenceTransitions.reopen(current, current.metadata.revision)
+                is IncomeReminderAction.Confirm -> IncomeOccurrenceTransitions.confirm(
+                    current, current.metadata.revision, receiptRef.id,
+                )
+            }
+            val changed = (decision as IncomeOccurrenceTransitions.Decision.Apply).occurrence
+            val next = changed.copy(
+                confirmedAmount = (action as? IncomeReminderAction.Confirm)?.amount,
+                metadata = changed.metadata.copy(revision = if (stored == null) 0L else changed.metadata.revision),
+            )
+            transaction.set(occurrenceRef, FoundationCodec.incomeReminderOccurrenceData(next))
+            if (receipt != null) transaction.set(receiptRef, receipt)
+            false
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
+    private fun requireIncomeReminderReferences(transaction: Transaction, schedule: Schedule) {
+        val accountRef = accounts.document(requireNotNull(schedule.preferredAccountId))
+        val sourceRef = owned.collection(UserCollection.INCOME_SOURCES).document(requireNotNull(schedule.incomeSourceId))
+        val account = FoundationCodec.account(
+            accountRef.id, requireNotNull(transaction.get(accountRef).data) { "Receiving account was not found." },
+        )
+        val source = FoundationCodec.incomeSource(
+            sourceRef.id, requireNotNull(transaction.get(sourceRef).data) { "Income source was not found." },
+        )
+        require(account.asset == FiatCurrency.LKR && account.metadata.archivedAt == null) {
+            "Choose an active LKR receiving account."
+        }
+        require(source.metadata.archivedAt == null && (source.defaultCurrency ?: FiatCurrency.LKR) == FiatCurrency.LKR) {
+            "Choose an active LKR income source."
+        }
     }
 
     fun observeMonthlyBills(): Flow<Observation<List<MonthlyBill>>> = observeQuery(
@@ -657,8 +815,9 @@ class FirebaseFoundationRepository internal constructor(
 
         require(account.openingTransactionId == command.operationId)
         require(account.openedOn == command.financialTime.occurredLocalDate)
-        require(account.asset == FiatCurrency.LKR)
         require(command.openingAmount.asset == account.asset)
+        if (account.asset is CryptoAsset) require(command.openingAmount.atomicUnits().signum() == 0)
+        else require(account.asset == FiatCurrency.LKR)
 
         val opening = FinancialTransaction(
             operationId = command.operationId,
@@ -738,6 +897,74 @@ class FirebaseFoundationRepository internal constructor(
             replayed = result.replayed,
         )
     }
+
+    fun observeCryptoPositions(): Flow<Observation<List<CryptoPosition>>> =
+        observeQuery(
+            query = { owned.collection(UserCollection.CRYPTO_POSITIONS).limit(5001) },
+            completeHistory = false,
+            coverageKey = "crypto-positions-v1",
+        ) { snapshot ->
+            snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
+                .map { FoundationCodec.cryptoPosition(it.id, requireNotNull(it.data)) }
+        }
+
+    suspend fun recordManualCryptoTrade(trade: ManualCryptoTrade): CommandResult<FinancialTransaction> =
+        command(trade.operationId) {
+            if (trade.fee.minor > 0L) {
+                // Trade rules read the category before the trade write. Save its stable ID first.
+                val feeCategory = Category(
+                    id = CRYPTO_FEE_CATEGORY_ID,
+                    name = "Crypto fees",
+                    defaultCommitmentClass = CommitmentClass.DISCRETIONARY,
+                    sortOrder = 3,
+                )
+                val saved = saveCategory(trade.operationId, feeCategory)
+                if (saved is CommandResult.Rejected) return@command saved
+            }
+
+            val eventRef = transactions.document(trade.operationId)
+            val positionRef = owned.collection(UserCollection.CRYPTO_POSITIONS).document(trade.walletId)
+            val result = firestore.runTransaction { transaction ->
+                requireSession()
+                val existing = transaction.get(eventRef)
+                if (existing.exists()) {
+                    val event = FoundationCodec.event(existing.id, requireNotNull(existing.data))
+                    if (!trade.matches(event)) throw conflict()
+                    return@runTransaction Applied(event, replayed = true)
+                }
+
+                val walletSnapshot = transaction.get(accounts.document(trade.walletId))
+                val quoteSnapshot = transaction.get(accounts.document(trade.quoteAccountId))
+                val positionSnapshot = transaction.get(positionRef)
+                val wallet = FoundationCodec.account(walletSnapshot.id, requireNotNull(walletSnapshot.data))
+                val quote = FoundationCodec.account(quoteSnapshot.id, requireNotNull(quoteSnapshot.data))
+                require(wallet.asset == trade.quantity.asset && wallet.metadata.archivedAt == null)
+                require(quote.asset == FiatCurrency.LKR && quote.metadata.archivedAt == null)
+                val current = if (positionSnapshot.exists()) {
+                    FoundationCodec.cryptoPosition(positionSnapshot.id, requireNotNull(positionSnapshot.data))
+                } else {
+                    CryptoPosition(wallet.id, CryptoQuantity(trade.quantity.asset, BigInteger.ZERO),
+                        KnownLkrAmount.Known(Money.lkr(0L)), wallet.openingTransactionId, 0L)
+                }
+                if (current.version != trade.expectedVersion) {
+                    throw FoundationProblem(FailureCode.CONFLICT, "Your crypto position changed. Review it and try again.")
+                }
+                positionSnapshot.getTimestamp("lastTradeAt")?.let { last ->
+                    val lastTrade = Instant.ofEpochSecond(last.seconds, last.nanoseconds.toLong())
+                    if (trade.time.occurredAt < lastTrade) {
+                        throw FoundationProblem(FailureCode.VALIDATION, "Use a date on or after the previous trade.")
+                    }
+                }
+                if (trade.kind == TransactionKind.CRYPTO_SELL && trade.quantity.atomic > current.quantity.atomic) {
+                    throw FoundationProblem(FailureCode.VALIDATION, "Cannot sell more than the recorded holding.")
+                }
+                val next = planManualCryptoTrade(trade, current)
+                transaction.set(eventRef, FoundationCodec.eventData(next.event))
+                transaction.set(positionRef, FoundationCodec.cryptoPositionData(next.position, trade.time.occurredAt))
+                Applied(next.event)
+            }.await()
+            CommandResult.Accepted(result.value, WriteState.CLOUD_CONFIRMED, result.replayed)
+        }
 
     private fun effectiveQuery(): Query =
         transactions

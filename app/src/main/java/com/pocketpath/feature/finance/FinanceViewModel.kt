@@ -3,6 +3,7 @@ package com.pocketpath.feature.finance
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.pocketpath.data.local.FinanceLocalStore
+import com.pocketpath.data.firebase.FoundationCodec
 import com.pocketpath.data.repository.FirebaseFoundationFactory
 import com.pocketpath.data.repository.FirebaseFoundationRepository
 import com.pocketpath.domain.calculation.*
@@ -12,6 +13,7 @@ import com.pocketpath.domain.repository.*
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import java.math.BigInteger
 import java.time.Instant
 import java.time.LocalDate
 import java.time.YearMonth
@@ -56,6 +58,8 @@ class FinanceViewModel @Inject constructor(
 
     private var pendingMonthlyBill: Schedule? = null
     private var pendingBillPayment: RecordExpenseCommand? = null
+    private var pendingCryptoWallet: CreateAccountCommand? = null
+    private var pendingCryptoTrade: ManualCryptoTrade? = null
 
     private var activityJob: Job? = null
     private var activityRequest = 0
@@ -85,6 +89,8 @@ class FinanceViewModel @Inject constructor(
                         pendingBudgetOperationId = null
                         pendingMonthlyBill = null
                         pendingBillPayment = null
+                        pendingCryptoWallet = null
+                        pendingCryptoTrade = null
                         _state.value = FinanceUiState(loading = false)
                         return@collectLatest
                     }
@@ -102,6 +108,8 @@ class FinanceViewModel @Inject constructor(
                     if (previous == null) {
                         pendingMonthlyBill = null
                         pendingBillPayment = null
+                        pendingCryptoWallet = null
+                        pendingCryptoTrade = null
                     }
 
                     _state.value = FinanceUiState(
@@ -110,6 +118,10 @@ class FinanceViewModel @Inject constructor(
                             ?: CashAccountForm(),
                         expenseForm = previous?.expenseForm?.copy(busy = false)
                             ?: ExpenseForm(),
+                        crypto = previous?.crypto?.copy(
+                            loading = true, cached = true, busy = false,
+                            retryWallet = pendingCryptoWallet != null, retryTrade = pendingCryptoTrade != null,
+                        ) ?: CryptoUiState(),
                         monthlyBills = previous?.monthlyBills?.let { bills ->
                             bills.copy(
                                 loading = true,
@@ -183,6 +195,26 @@ class FinanceViewModel @Inject constructor(
                                     throw cancelled
                                 } catch (_: Exception) {
                                     // Another attempt occurs when server snapshots return or the user retries.
+                                }
+                            }
+
+                            launch {
+                                current.observeCryptoPositions().collect { observation ->
+                                    if (epoch != generation || _state.value.userId != uid) return@collect
+                                    _state.update { state ->
+                                        state.copy(crypto = when (observation) {
+                                            Observation.Loading -> state.crypto.copy(loading = true, positionsError = null)
+                                            is Observation.Data -> state.crypto.copy(
+                                                positions = observation.value.associateBy(CryptoPosition::accountId),
+                                                loading = false,
+                                                cached = observation.metadata.origin == DataOrigin.CACHE,
+                                                positionsError = null,
+                                            )
+                                            is Observation.Failed -> state.crypto.copy(
+                                                loading = false, cached = true, positionsError = observation.failure.message,
+                                            )
+                                        })
+                                    }
                                 }
                             }
 
@@ -455,6 +487,21 @@ class FinanceViewModel @Inject constructor(
         if (_state.value.userId != userId) return
 
         when (event) {
+            is FinanceEvent.SelectCryptoAsset -> editCrypto { it.copy(assetCode = event.code) }
+            FinanceEvent.CreateCryptoWallet -> createCryptoWallet()
+            is FinanceEvent.EditCryptoTrade -> editCrypto { state ->
+                val form = state.trade
+                state.copy(trade = form.copy(
+                    kind = event.kind ?: form.kind,
+                    walletId = event.walletId ?: form.walletId,
+                    quoteAccountId = event.quoteAccountId ?: form.quoteAccountId,
+                    quantity = event.quantity ?: form.quantity,
+                    gross = event.gross ?: form.gross,
+                    fee = event.fee ?: form.fee,
+                    date = event.date ?: form.date,
+                ))
+            }
+            FinanceEvent.SaveCryptoTrade -> saveCryptoTrade()
             FinanceEvent.RetryConnection -> {
                 val epoch = generation
                 val controller = drafts
@@ -971,6 +1018,104 @@ class FinanceViewModel @Inject constructor(
     }
 
     private fun today(): String = LocalDate.now(zone).toString()
+
+    private fun editCrypto(edit: (CryptoUiState) -> CryptoUiState) {
+        _state.update { state ->
+            if (state.crypto.busy || state.crypto.retryWallet || state.crypto.retryTrade) state
+            else state.copy(crypto = edit(state.crypto).copy(error = null, message = null))
+        }
+    }
+
+    private fun createCryptoWallet() {
+        val current = _state.value
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        if (current.crypto.busy || current.crypto.retryTrade) return
+        val command = pendingCryptoWallet ?: run {
+            val asset = current.availableCryptoAssets.firstOrNull { it.code == current.crypto.assetCode }
+                ?: current.availableCryptoAssets.firstOrNull() ?: return
+            val now = FoundationCodec.storedInstant(Instant.now())
+            val time = financialTime(now.atZone(zone).toLocalDate().toString(), now)
+            val openingId = "opening-wallet-${asset.code}"
+            CreateAccountCommand(
+                openingId,
+                Account("wallet-${asset.code}", "${asset.code} wallet", AccountType.CRYPTO_WALLET, asset,
+                    false, openingId, time.occurredLocalDate),
+                NativeAmount.Crypto(CryptoQuantity(asset, BigInteger.ZERO)), time, now,
+            )
+        }
+        pendingCryptoWallet = command
+        updateCrypto { it.copy(busy = true, error = null, message = null) }
+        val epoch = generation
+        scope.launch {
+            val result = repo.createWithOpening(command)
+            if (epoch != generation) return@launch
+            when (result) {
+                is CommandResult.Accepted -> {
+                    pendingCryptoWallet = null
+                    updateCrypto { it.copy(busy = false, retryWallet = false, assetCode = null, message = "Wallet ready.") }
+                }
+                is CommandResult.Rejected -> {
+                    val retry = result.failure.code in setOf(FailureCode.NETWORK, FailureCode.REJECTED)
+                    if (!retry) pendingCryptoWallet = null
+                    updateCrypto { it.copy(busy = false, retryWallet = retry, error = result.failure.message) }
+                }
+            }
+        }
+    }
+
+    private fun saveCryptoTrade() {
+        val current = _state.value
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        val crypto = current.crypto
+        if (crypto.busy || crypto.retryWallet) return
+        val trade = pendingCryptoTrade ?: try {
+            require(!crypto.loading && !crypto.cached && crypto.positionsError == null) {
+                "Refresh your crypto position before recording a trade."
+            }
+            val wallet = requireNotNull(current.selectedCryptoWallet) { "Select a crypto wallet." }
+            val quote = requireNotNull(current.selectedCryptoQuoteAccount) { "Select an LKR account." }
+            val form = crypto.trade
+            val now = FoundationCodec.storedInstant(Instant.now())
+            val date = form.date.ifBlank { now.atZone(zone).toLocalDate().toString() }
+            ManualCryptoTrade(
+                UUID.randomUUID().toString(), form.kind, wallet.id, quote.id,
+                CryptoQuantity.parse(form.quantity.trim(), wallet.asset as CryptoAsset),
+                EntryAmount(Money.parse(form.gross.trim(), FiatCurrency.LKR)),
+                Money.parse(form.fee.trim().ifEmpty { "0" }, FiatCurrency.LKR),
+                financialTime(date, now), now, crypto.positions[wallet.id]?.version ?: 0L,
+            )
+        } catch (error: RuntimeException) {
+            updateCrypto { it.copy(error = error.message ?: "Check the trade quantity, amounts and date.") }
+            return
+        }
+        pendingCryptoTrade = trade
+        updateCrypto { it.copy(busy = true, error = null, message = null) }
+        val epoch = generation
+        scope.launch {
+            val result = repo.recordManualCryptoTrade(trade)
+            if (epoch != generation) return@launch
+            when (result) {
+                is CommandResult.Accepted -> {
+                    pendingCryptoTrade = null
+                    updateCrypto { state -> state.copy(
+                        busy = false, retryTrade = false, message = "Trade recorded.",
+                        trade = state.trade.copy(quantity = "", gross = "", fee = "", date = ""),
+                    ) }
+                }
+                is CommandResult.Rejected -> {
+                    val retry = result.failure.code in setOf(FailureCode.NETWORK, FailureCode.REJECTED)
+                    if (!retry) pendingCryptoTrade = null
+                    updateCrypto { it.copy(busy = false, retryTrade = retry, error = result.failure.message) }
+                }
+            }
+        }
+    }
+
+    private fun updateCrypto(update: (CryptoUiState) -> CryptoUiState) {
+        _state.update { it.copy(crypto = update(it.crypto)) }
+    }
 
     private fun financialTime(dateText: String, now: Instant): FinancialTime {
         val date = LocalDate.parse(dateText.trim())

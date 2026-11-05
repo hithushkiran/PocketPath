@@ -6,6 +6,8 @@ import com.pocketpath.feature.goals.GoalsUiState
 import com.pocketpath.feature.goals.GoalsViewModel
 import com.pocketpath.feature.income.ManualIncomeUiState
 import com.pocketpath.feature.income.ManualIncomeViewModel
+import com.pocketpath.feature.income.IncomeRemindersUiState
+import com.pocketpath.feature.income.IncomeRemindersViewModel
 import com.pocketpath.feature.income.ExpectedPaymentsUiState
 import com.pocketpath.feature.income.ExpectedPaymentsViewModel
 import com.pocketpath.feature.income.ExpectedPaymentCreationUiState
@@ -37,6 +39,7 @@ fun AuthRoot(
     financeViewModel: FinanceViewModel,
     goalsViewModel: GoalsViewModel,
     incomeViewModel: ManualIncomeViewModel,
+    incomeRemindersViewModel: IncomeRemindersViewModel,
     expectedPaymentsViewModel: ExpectedPaymentsViewModel,
     expectedPaymentCreationViewModel: ExpectedPaymentCreationViewModel,
 ) {
@@ -70,6 +73,8 @@ fun AuthRoot(
             val goalsState by goalsViewModel.state.collectAsStateWithLifecycle()
             val visibleGoals = goalsState.takeIf { it.userId == current.user.uid } ?: GoalsUiState()
             val incomeState by incomeViewModel.state.collectAsStateWithLifecycle()
+            val reminders by incomeRemindersViewModel.state.collectAsStateWithLifecycle()
+            val visibleReminders = reminders.takeIf { it.userId == current.user.uid } ?: IncomeRemindersUiState()
             val expectedPaymentsState by expectedPaymentsViewModel.state.collectAsStateWithLifecycle()
             val expectedPaymentCreationState by expectedPaymentCreationViewModel.state.collectAsStateWithLifecycle()
 
@@ -99,9 +104,9 @@ fun AuthRoot(
                         ?: visibleFinance.localError,
                     onSignOut = {
                         if (visibleFinance.hasUnresolvedLocalWork || visibleFinance.monthlyBills.hasUnresolvedSave ||
-                            visibleGoals.hasUnresolvedWrite ||
+                            visibleFinance.crypto.hasUnresolvedWrite || visibleGoals.hasUnresolvedWrite ||
                             visibleIncome.hasUnresolvedIncomeWork ||
-                            visibleIncome.hasUnresolvedSourceWork ||
+                            visibleIncome.hasUnresolvedSourceWork || visibleReminders.hasUnresolvedWrite ||
                             visibleExpectedPayments.hasUnresolvedCancellationRetry || visibleExpectedPayments.receiptRecovery.hasWork
                         ) {
                             confirmSignOut = true
@@ -119,6 +124,12 @@ fun AuthRoot(
                     },
                     incomeState = visibleIncome,
                     onIncomeEvent = { incomeViewModel.onEvent(current.user.uid, it) },
+                    incomeRemindersState = visibleReminders,
+                    onSaveIncomeReminder = { incomeRemindersViewModel.save(current.user.uid, it) },
+                    onIncomeReminderAction = { occurrence, reminderAction ->
+                        incomeRemindersViewModel.act(current.user.uid, occurrence, reminderAction)
+                    },
+                    onRetryIncomeReminder = { incomeRemindersViewModel.retry(current.user.uid) },
                     expectedPaymentsState = visibleExpectedPayments,
                     onExpectedPaymentCancel = {
                         expectedPaymentsViewModel.cancel(current.user.uid, it)
@@ -174,6 +185,11 @@ fun AuthRoot(
                                     append("A bill or payment may already have reached the server. Signing out discards " +
                                         "its retry details. Check Plan and Activity after signing back in before trying again.")
                                 }
+                                if (visibleFinance.crypto.hasUnresolvedWrite) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append("A crypto save may already have reached the server. Signing out clears its " +
+                                        "retry details. Check Crypto and Activity after signing back in.")
+                                }
                                 if (visibleGoals.hasUnresolvedWrite) {
                                     if (isNotEmpty()) append("\n\n")
                                     append("A goal or contribution may already have saved. Signing out clears its " +
@@ -194,6 +210,11 @@ fun AuthRoot(
                                             "Signing out will discard its retry information, and " +
                                         "the source may already have been created.",
                                     )
+                                }
+                                if (visibleReminders.hasUnresolvedWrite) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append("A reminder change or receipt may have saved. Signing out clears its retry details. " +
+                                        "Check Recurring income and Activity after signing back in.")
                                 }
                                 if (visibleExpectedPayments.receiptRecovery.hasWork) {
                                     if (isNotEmpty()) append("\n\n")

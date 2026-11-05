@@ -1,5 +1,8 @@
 package com.pocketpath.feature.income
 
+import com.google.firebase.Timestamp
+import com.pocketpath.data.firebase.FoundationCodec
+import com.pocketpath.domain.calculation.summarizeHomeLedger
 import com.pocketpath.domain.model.Account
 import com.pocketpath.domain.model.AccountType
 import com.pocketpath.domain.model.ComponentNature
@@ -8,10 +11,16 @@ import com.pocketpath.domain.model.IncomeSourceKind
 import com.pocketpath.domain.model.TransactionKind
 import com.pocketpath.domain.model.TransactionStatus
 import com.pocketpath.domain.money.FiatCurrency
+import com.pocketpath.domain.money.KnownLkrAmount
+import com.pocketpath.domain.money.Money
+import com.pocketpath.domain.money.NativeAmount
+import com.pocketpath.domain.repository.CompleteLedger
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Test
@@ -74,6 +83,56 @@ class ManualIncomeEventFactoryTest {
         org.junit.Assert.assertEquals(true, ManualIncomeUiState(locked = true).hasUnresolvedIncomeWork)
         org.junit.Assert.assertEquals(false, ManualIncomeUiState(locked = true, saved = true).hasUnresolvedIncomeWork)
         org.junit.Assert.assertEquals(false, ManualIncomeUiState().hasUnresolvedIncomeWork)
+    }
+
+    @Test fun convertedReceiptRoundTripsExactOriginalRateAndSingleRoundedLkrCredit() {
+        val event = adSenseIncome("300.5")
+        val component = event.components.single()
+        assertEquals(NativeAmount.Fiat(Money(FiatCurrency.USD, 1L)), component.originalAmount)
+        assertEquals(301L, event.movements.single().amount.atomicUnits().toLong())
+        assertEquals(KnownLkrAmount.Known(Money.lkr(301L)), component.lkrAmount)
+
+        val payload = FoundationCodec.eventData(event)
+        val stored = payload + ("createdAt" to Timestamp(now.epochSecond, 0))
+        val reloaded = FoundationCodec.event(event.id, stored)
+        assertEquals(component, reloaded.components.single())
+        assertEquals(event.movements, reloaded.movements)
+        assertTrue(FoundationCodec.sameEvent(stored, payload))
+        // Same rounded LKR, different historical rate is still a different operation.
+        assertFalse(FoundationCodec.sameEvent(stored, FoundationCodec.eventData(adSenseIncome("300.6"))))
+    }
+
+    @Test fun homeGroupsActualReceiptsBySourceWithinTheMonth() {
+        val salary = income("100", "2026-10-24")
+        val olderSalary = income("50", "2026-09-30", operationId = "last-month")
+        val summary = summarizeHomeLedger(
+            CompleteLedger(listOf(salary, olderSalary, adSenseIncome("300.5"))),
+            LocalDate.of(2026, 10, 25),
+            zone,
+        )
+        assertEquals(mapOf("salary" to 10_000L, "adsense" to 301L), summary.receivedBySourceMinor)
+        assertEquals(10_301L, summary.receivedMinor)
+    }
+
+    @Test fun rejectsInvalidConvertedUsdAmountsAndRates() {
+        for (rate in listOf("0", "-1", "300.0000001", "10000", "3e2", "0.000001")) {
+            assertThrows(IllegalArgumentException::class.java) { adSenseIncome(rate) }
+        }
+        assertThrows(IllegalArgumentException::class.java) { adSenseIncome("300", amount = "0.001") }
+        assertThrows(IllegalArgumentException::class.java) {
+            ManualIncomeEventFactory.create(
+                "id", source.id, account.id, "1", "2026-10-24", "", zone, now,
+                listOf(account), listOf(source), usdRateText = "300",
+            )
+        }
+    }
+
+    private fun adSenseIncome(rate: String, amount: String = "0.01"): com.pocketpath.domain.model.FinancialTransaction {
+        val source = IncomeSource("adsense", "AdSense", IncomeSourceKind.ADSENSE)
+        return ManualIncomeEventFactory.create(
+            "converted-receipt", source.id, account.id, amount, "2026-10-24", "", zone, now,
+            listOf(account), listOf(source), usdRateText = rate,
+        )
     }
 
     private fun income(amount: String, date: String, note: String = "", operationId: String = "operation") =

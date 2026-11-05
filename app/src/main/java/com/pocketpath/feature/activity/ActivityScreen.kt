@@ -8,6 +8,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.pocketpath.domain.model.TransactionKind
+import com.pocketpath.domain.money.KnownLkrAmount
+import com.pocketpath.domain.money.NativeAmount
 import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.ui.components.FinanceMessage
@@ -51,6 +53,9 @@ fun ActivityScreen(
             val title = when (event.kind) {
                 TransactionKind.OPENING -> "Opening balance"
                 TransactionKind.GOAL_RESERVE -> "Goal contribution"
+                TransactionKind.INCOME -> "Income"
+                TransactionKind.CRYPTO_BUY -> "Crypto buy"
+                TransactionKind.CRYPTO_SELL -> "Crypto sell"
                 TransactionKind.EXPENSE -> {
                     val categoryId = event.components.firstOrNull()?.categoryId
                     val name = state.categories.firstOrNull {
@@ -106,7 +111,28 @@ fun ActivityScreen(
                         )
                     }
 
+                    event.cryptoTrade?.let { trade ->
+                        Text("${trade.quantity.asset.code} ${trade.quantity.major().stripTrailingZeros().toPlainString()}",
+                            style = MaterialTheme.typography.titleLarge)
+                        Text("Trade value: ${lkrText(trade.proceedsOrAcquisitionLkr.minor)}")
+                        for (fee in trade.fees) {
+                            Text("Fee: ${lkrText(fee.lkrAmount.minor)}")
+                        }
+                        val cash = event.movements.firstOrNull { it.accountId == trade.quoteAccountId }?.amount
+                        (cash as? NativeAmount.Fiat)?.let { Text("Cash movement: ${lkrText(it.money.minor)}") }
+                        (trade.realizedPnl as? KnownLkrAmount.Known)?.let {
+                            Text("Realized gain/loss: ${lkrText(it.amount.minor)}")
+                        }
+                    }
                     reservation?.let { Text("${lkrText(it.amountLkr.minor)} reserved") }
+                    event.components.singleOrNull()?.let { component ->
+                        val original = component.originalAmount
+                        val rate = component.valuationRate
+                        if (event.kind == TransactionKind.INCOME && original != null && rate != null) {
+                            Text("Original amount: ${original.asset.code} ${original.major().toPlainString()}")
+                            Text("Applied receipt rate: ${rate.lkrPerMajor.stripTrailingZeros().toPlainString()} LKR per ${original.asset.code}")
+                        }
+                    }
                     accountName?.let { Text(it) }
                     Text(event.financialTime.occurredLocalDate.toString())
                     event.note?.let { Text(it) }

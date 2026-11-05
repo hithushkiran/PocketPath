@@ -5,6 +5,7 @@ import com.pocketpath.domain.model.*
 import com.pocketpath.domain.money.*
 import com.pocketpath.domain.repository.CompleteLedger
 import com.pocketpath.domain.repository.LedgerScope
+import com.pocketpath.feature.finance.FinanceUiState
 import org.junit.Assert.*
 import org.junit.Test
 import java.time.Instant
@@ -86,6 +87,44 @@ class P04PlanningCalculationsTest {
         assertThrows(IllegalArgumentException::class.java) {
             calculateSavingsPace(goal, 0L, date, listOf(date, date))
         }
+    }
+
+    @Test fun savedGoalAndHomeRecalculatePaceFromConfirmedReservations() {
+        val saved = goal.copy(firstContributionDate = date)
+        val opening = reservation("opening-allocation", 1_120_000L)
+        fun stateFor(events: List<FinancialTransaction>): FinanceUiState {
+            val summary = summarizeHomeLedger(CompleteLedger(events), date, zone)
+            return FinanceUiState(
+                userId = "owner", loading = false, homeLedger = summary,
+                goalReservationsMinor = summary.reservedByGoal,
+            )
+        }
+
+        assertNull(FinanceUiState(userId = "owner").savedGoalProgress(saved))
+        val initial = requireNotNull(stateFor(listOf(opening)).savedGoalProgress(saved))
+        assertEquals(1_120_000L, initial.confirmedReservedMinor)
+        assertEquals(47_880_000L, initial.pace.remainingLkrMinor)
+        assertEquals(12, initial.pace.installments.size)
+        assertTrue(initial.pace.installments.all { it.amountLkrMinor == 3_990_000L })
+
+        val after = stateFor(listOf(opening, reservation("new-contribution", 1_200_000L)))
+        val updated = requireNotNull(after.savedGoalProgress(saved))
+        assertEquals(2_320_000L, updated.confirmedReservedMinor)
+        assertTrue(updated.pace.installments.all { it.amountLkrMinor == 3_890_000L })
+        val reached = saved.copy(id = "reached", deadline = date, target = EntryAmount(Money.lkr(1L)))
+        val withReached = after.copy(goalReservationsMinor = requireNotNull(after.goalReservationsMinor) + (reached.id to 1L))
+        assertEquals(updated, withReached.featuredGoalProgress(listOf(reached, saved)))
+        assertEquals(SavingsPaceStatus.TARGET_REACHED, withReached.featuredGoalProgress(listOf(reached))?.pace?.status)
+    }
+
+    @Test fun savedGoalPaceSkipsElapsedDatesAndKeepsTheOriginalMonthlyAnchor() {
+        val first = LocalDate.of(2027, 1, 31)
+        val deadline = LocalDate.of(2027, 3, 31)
+        val saved = goal.copy(startDate = first, deadline = deadline, firstContributionDate = first)
+        val result = calculateSavedGoalProgress(saved, 0L, LocalDate.of(2027, 2, 1))
+        assertEquals(listOf(LocalDate.of(2027, 2, 28), deadline), result.pace.installments.map { it.date })
+        assertEquals(SavingsPaceStatus.REPLAN_REQUIRED, calculateSavedGoalProgress(saved, 0L, deadline.plusDays(1)).pace.status)
+        assertEquals(SavingsPaceStatus.REPLAN_REQUIRED, calculateSavedGoalProgress(saved.copy(firstContributionDate = null), 0L, first).pace.status)
     }
 
     @Test fun payingBillsAndConfirmingPlannedSavingsDoNotDeductTwice() {

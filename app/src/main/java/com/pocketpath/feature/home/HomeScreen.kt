@@ -10,6 +10,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.pocketpath.domain.calculation.FundsPlanningResult
+import com.pocketpath.domain.calculation.SavedGoalProgress
+import com.pocketpath.feature.goals.SavedGoalPaceDetails
+import com.pocketpath.domain.model.IncomeSource
 import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.ui.components.*
@@ -20,6 +23,8 @@ fun HomeScreen(
     onEvent: (FinanceEvent) -> Unit,
     onAccounts: () -> Unit,
     onAddExpense: () -> Unit,
+    incomeSources: List<IncomeSource> = emptyList(),
+    goalProgress: SavedGoalProgress? = null,
 ) {
     val plan = state.homeFunds
     FinanceBody(state, onEvent) {
@@ -64,10 +69,34 @@ fun HomeScreen(
             }
         }
 
+        goalProgress?.let { progress ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Savings goal · ${progress.goal.name}", style = MaterialTheme.typography.titleMedium)
+                    Text("Target ${lkrText(progress.goal.target.money.minor)} · Due ${progress.goal.deadline}")
+                    SavedGoalPaceDetails(progress)
+                }
+            }
+        }
+
         state.homeLedger?.let { summary ->
             Text("This month through ${summary.date}", style = MaterialTheme.typography.titleMedium)
             AmountRow("Income received", summary.receivedMinor)
+            if (summary.receivedBySourceMinor.isNotEmpty()) {
+                Text("Received by source", style = MaterialTheme.typography.titleSmall)
+                val labels = incomeSources.associate { it.id to it.name }
+                summary.receivedBySourceMinor.entries
+                    .sortedWith(compareByDescending<Map.Entry<String, Long>> { it.value }.thenBy { it.key })
+                    .forEach { (id, amount) ->
+                        AmountRow(labels[id] ?: "Source unavailable", amount)
+                    }
+                Text("Outstanding expected payments are shown separately in Accounts.")
+            }
             AmountRow("Net spending", summary.netSpendingMinor)
+            summary.realizedCrypto?.let { realized ->
+                AmountRow("Realized crypto gain/loss", realized.knownLkrMinor)
+                if (!realized.isComplete) Text("Some sale costs are unavailable.")
+            }
         }
 
         state.accounts.forEach { account ->
