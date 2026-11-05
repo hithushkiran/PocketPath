@@ -9,6 +9,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -52,7 +53,7 @@ internal fun MonthlyBillsHeader(
                 Text("Review payment")
             }
         }
-        OutlinedButton(
+        Button(
             onClick = { onEvent(FinanceEvent.OpenMonthlyBill) },
             enabled = hasCategories || state.form != null,
         ) {
@@ -155,13 +156,27 @@ internal fun MonthlyBillCard(
         due == today -> "Due today"
         else -> "Upcoming"
     }
-    Card(Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    val colors = MaterialTheme.colorScheme
+    val statusColor = when {
+        bill.remainingMinor == 0L -> colors.secondary
+        due < today -> colors.error
+        due == today -> colors.tertiary
+        else -> colors.onSurfaceVariant
+    }
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = colors.surfaceContainerLow),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(status, style = MaterialTheme.typography.labelLarge, color = statusColor)
             Text(bill.occurrence.titleSnapshot, style = MaterialTheme.typography.titleMedium)
-            Text("Due $due · $status")
-            Text("Paid ${lkrText(bill.paidMinor)} · Remaining ${lkrText(bill.remainingMinor)}")
+            Text(lkrText(bill.remainingMinor), style = MaterialTheme.typography.headlineSmall)
+            Text("Remaining · Due $due", style = MaterialTheme.typography.bodySmall)
+            Text("Paid ${lkrText(bill.paidMinor)}", style = MaterialTheme.typography.bodyMedium)
             if (bill.occurrence.amountMode == AmountMode.ESTIMATE) {
-                Text("Estimate ${lkrText(bill.occurrence.expectedAmount.money.minor)} · Actual ${bill.actualAmount?.money?.minor?.let(::lkrText) ?: "not entered"}")
+                Text("Estimate ${lkrText(bill.occurrence.expectedAmount.money.minor)}", style = MaterialTheme.typography.bodyMedium)
+                val actual = bill.actualAmount?.money?.minor?.let(::lkrText)
+                Text(actual?.let { "Actual $it" } ?: "Actual amount pending", style = MaterialTheme.typography.bodyMedium)
             }
             if (bill.remainingMinor > 0L || bill.occurrence.amountMode == AmountMode.ESTIMATE) {
                 OutlinedButton(onClick = onPay, enabled = canPay) {

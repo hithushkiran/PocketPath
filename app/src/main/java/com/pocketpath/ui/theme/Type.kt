@@ -4,31 +4,26 @@ import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.sp
 
-// Set of Material typography styles to start with
+private val defaults = Typography()
+
+private fun TextStyle.pocketPath(weight: FontWeight = fontWeight ?: FontWeight.Normal): TextStyle =
+    copy(fontFamily = FontFamily.SansSerif, fontWeight = weight, fontFeatureSettings = "tnum")
+
 val Typography = Typography(
-    bodyLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 16.sp,
-        lineHeight = 24.sp,
-        letterSpacing = 0.5.sp
-    )
-    /* Other default text styles to override
-    titleLarge = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Normal,
-        fontSize = 22.sp,
-        lineHeight = 28.sp,
-        letterSpacing = 0.sp
-    ),
-    labelSmall = TextStyle(
-        fontFamily = FontFamily.Default,
-        fontWeight = FontWeight.Medium,
-        fontSize = 11.sp,
-        lineHeight = 16.sp,
-        letterSpacing = 0.5.sp
-    )
-    */
+    displayLarge = defaults.displayLarge.pocketPath(FontWeight.Bold),
+    displayMedium = defaults.displayMedium.pocketPath(FontWeight.Bold),
+    displaySmall = defaults.displaySmall.pocketPath(FontWeight.Bold),
+    headlineLarge = defaults.headlineLarge.pocketPath(FontWeight.Bold),
+    headlineMedium = defaults.headlineMedium.pocketPath(FontWeight.Bold),
+    headlineSmall = defaults.headlineSmall.pocketPath(FontWeight.SemiBold),
+    titleLarge = defaults.titleLarge.pocketPath(FontWeight.SemiBold),
+    titleMedium = defaults.titleMedium.pocketPath(FontWeight.SemiBold),
+    titleSmall = defaults.titleSmall.pocketPath(FontWeight.SemiBold),
+    bodyLarge = defaults.bodyLarge.pocketPath(),
+    bodyMedium = defaults.bodyMedium.pocketPath(),
+    bodySmall = defaults.bodySmall.pocketPath(),
+    labelLarge = defaults.labelLarge.pocketPath(FontWeight.SemiBold),
+    labelMedium = defaults.labelMedium.pocketPath(),
+    labelSmall = defaults.labelSmall.pocketPath(),
 )

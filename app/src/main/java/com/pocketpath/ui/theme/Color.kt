@@ -1,11 +1,77 @@
 package com.pocketpath.ui.theme
 
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.ui.graphics.Color
 
-val Purple80 = Color(0xFFD0BCFF)
-val PurpleGrey80 = Color(0xFFCCC2DC)
-val Pink80 = Color(0xFFEFB8C8)
+internal val PocketPathDark = darkColorScheme(
+    primary = Color(0xFF79DDCC),
+    surfaceTint = Color(0xFF79DDCC),
+    onPrimary = Color(0xFF00382F),
+    primaryContainer = Color(0xFF164840),
+    onPrimaryContainer = Color(0xFFBCFAEA),
+    secondary = Color(0xFF91D9AC),
+    onSecondary = Color(0xFF103823),
+    secondaryContainer = Color(0xFF244A35),
+    onSecondaryContainer = Color(0xFFBAF1CA),
+    tertiary = Color(0xFFFFC580),
+    onTertiary = Color(0xFF452700),
+    tertiaryContainer = Color(0xFF5D3B13),
+    onTertiaryContainer = Color(0xFFFFDDB4),
+    background = Color(0xFF101820),
+    onBackground = Color(0xFFE5EDF1),
+    surface = Color(0xFF101820),
+    onSurface = Color(0xFFE5EDF1),
+    surfaceVariant = Color(0xFF263641),
+    onSurfaceVariant = Color(0xFFBACBD4),
+    surfaceContainerLowest = Color(0xFF0C131A),
+    surfaceContainerLow = Color(0xFF16212A),
+    surfaceContainer = Color(0xFF1B2832),
+    surfaceContainerHigh = Color(0xFF22313C),
+    surfaceContainerHighest = Color(0xFF293A46),
+    outline = Color(0xFF879DAA),
+    outlineVariant = Color(0xFF3F515D),
+    inverseSurface = Color(0xFFE5EDF1),
+    inverseOnSurface = Color(0xFF202E37),
+    inversePrimary = Color(0xFF00685B),
+    error = Color(0xFFFFB4A9),
+    onError = Color(0xFF680E07),
+    errorContainer = Color(0xFF792821),
+    onErrorContainer = Color(0xFFFFDAD4),
+)
 
-val Purple40 = Color(0xFF6650a4)
-val PurpleGrey40 = Color(0xFF625b71)
-val Pink40 = Color(0xFF7D5260)
+internal val PocketPathLight = lightColorScheme(
+    primary = Color(0xFF00685B),
+    surfaceTint = Color(0xFF00685B),
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFFCEEEE7),
+    onPrimaryContainer = Color(0xFF073B33),
+    secondary = Color(0xFF246341),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFD6F0DF),
+    onSecondaryContainer = Color(0xFF123E28),
+    tertiary = Color(0xFF8A4C00),
+    onTertiary = Color.White,
+    tertiaryContainer = Color(0xFFFFE4C1),
+    onTertiaryContainer = Color(0xFF542F04),
+    background = Color(0xFFF3F7F9),
+    onBackground = Color(0xFF15232D),
+    surface = Color(0xFFF3F7F9),
+    onSurface = Color(0xFF15232D),
+    surfaceVariant = Color(0xFFE3EDF1),
+    onSurfaceVariant = Color(0xFF435866),
+    surfaceContainerLowest = Color.White,
+    surfaceContainerLow = Color(0xFFEDF3F6),
+    surfaceContainer = Color(0xFFE8EFF3),
+    surfaceContainerHigh = Color(0xFFE0E9EE),
+    surfaceContainerHighest = Color(0xFFD9E4EB),
+    outline = Color(0xFF5B7280),
+    outlineVariant = Color(0xFFB8C9D1),
+    inverseSurface = Color(0xFF26353E),
+    inverseOnSurface = Color(0xFFEDF5F8),
+    inversePrimary = Color(0xFF79DDCC),
+    error = Color(0xFFB02F26),
+    onError = Color.White,
+    errorContainer = Color(0xFFFFDAD4),
+    onErrorContainer = Color(0xFF721C16),
+)

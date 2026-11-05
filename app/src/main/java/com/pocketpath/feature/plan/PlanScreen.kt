@@ -2,8 +2,15 @@ package com.pocketpath.feature.plan
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -19,139 +26,63 @@ import com.pocketpath.feature.finance.FinanceUiState
 import com.pocketpath.ui.components.FinanceChoice
 import com.pocketpath.ui.components.FinanceMessage
 import com.pocketpath.ui.components.FinanceStatus
+import com.pocketpath.ui.components.SectionTabs
 import com.pocketpath.ui.components.lkrText
 import java.time.LocalDate
-import java.time.ZoneId
 
 @Composable
 fun PlanScreen(
     state: FinanceUiState = FinanceUiState(),
     onEvent: (FinanceEvent) -> Unit = {},
 ) {
-    LazyColumn(
-        modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = 24.dp,
-            top = 24.dp,
-            end = 24.dp,
-            bottom = 112.dp,
-        ),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "Planning & Budgeting",
-                        style = MaterialTheme.typography.headlineSmall,
-                    )
-                    OutlinedButton(
-                        onClick = { onEvent(FinanceEvent.ToggleBudgetDialog(true)) },
-                        enabled = state.ready,
-                    ) {
-                        Text("Set Budget")
-                    }
-                }
-                FinanceStatus(state, onEvent)
-            }
+    var section by rememberSaveable { mutableStateOf(PlanSection.BILLS) }
+    Column(Modifier.fillMaxSize()) {
+        SectionTabs(PlanSection.entries.map { it.label }, section.ordinal) {
+            section = PlanSection.entries[it]
         }
 
-        item {
-            MonthlyBillsHeader(state.monthlyBills, state.selectableCategories.isNotEmpty(), onEvent)
-        }
-        items(
-            count = state.monthlyBills.occurrences.size,
-            key = { state.monthlyBills.occurrences[it].occurrence.id },
-        ) { index ->
-            val bill = state.monthlyBills.occurrences[index]
-            val date = LocalDate.now(bill.occurrence.timeZone)
-            MonthlyBillCard(
-                bill = bill,
-                today = date,
-                canPay = state.selectableAccounts.isNotEmpty() && !state.monthlyBills.cached &&
-                    !state.monthlyBills.loading && state.monthlyBills.error == null &&
-                    state.monthlyBills.payment == null,
-                onPay = { onEvent(FinanceEvent.OpenBillPayment(bill.occurrence.id)) },
-            )
-        }
-
-        val hasBudgets = state.overallMonthlyBudgetProgress != null ||
-            state.overallWeeklyBudgetProgress != null ||
-            state.categoryBudgetProgresses.isNotEmpty()
-
-        if (state.budgetError != null) {
-            item {
-                FinanceMessage(state.budgetError)
-            }
-        } else if (!hasBudgets) {
-            item {
-                Card(modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        modifier = Modifier.padding(20.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Text(
-                            "No budgets set yet",
-                            style = MaterialTheme.typography.titleMedium,
-                        )
-                        Text(
-                            "Set weekly or monthly spending limits to track your " +
-                                "discretionary expenses and keep your spending under control.",
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        Button(
-                            onClick = { onEvent(FinanceEvent.ToggleBudgetDialog(true)) },
-                            enabled = state.ready,
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text("Set a budget")
+        key(section) {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FinanceStatus(state, onEvent, showRoutineMessages = false)
+                        when (section) {
+                            PlanSection.BILLS -> MonthlyBillsHeader(
+                                state.monthlyBills, state.selectableCategories.isNotEmpty(), onEvent,
+                            )
+                            PlanSection.BUDGETS -> {
+                                Text("Spending limits", style = MaterialTheme.typography.titleLarge)
+                                Button(
+                                    onClick = { onEvent(FinanceEvent.ToggleBudgetDialog(true)) },
+                                    enabled = state.ready,
+                                ) {
+                                    Text("Set a budget")
+                                }
+                            }
+                            PlanSection.SPENDING -> Text(
+                                "This month’s spending",
+                                style = MaterialTheme.typography.titleLarge,
+                            )
                         }
                     }
                 }
-            }
-        } else {
-            state.overallMonthlyBudgetProgress?.let { progress ->
-                item {
-                    OverallBudgetCard("Overall Monthly Discretionary Budget", progress)
-                }
-            }
 
-            state.overallWeeklyBudgetProgress?.let { progress ->
-                item {
-                    OverallBudgetCard("Overall Weekly Discretionary Budget", progress)
-                }
-            }
-
-            if (state.categoryBudgetProgresses.isNotEmpty()) {
-                item {
-                    Text(
-                        "Category Spending Limits",
-                        style = MaterialTheme.typography.titleLarge,
-                    )
-                }
-
-                state.categoryBudgetProgresses.forEach { (categoryName, progress) ->
-                    item {
-                        CategoryBudgetCard(categoryName, progress)
+                when (section) {
+                    PlanSection.BILLS -> billItems(state, onEvent)
+                    PlanSection.BUDGETS -> budgetItems(state)
+                    PlanSection.SPENDING -> {
+                        val breakdown = state.monthlyCommitmentBreakdown
+                        if (breakdown != null) {
+                            item { SpendingBreakdownCard(breakdown) }
+                        } else if (state.ready) {
+                            item { Text("Spending breakdown is unavailable.") }
+                        }
                     }
                 }
-            }
-        }
-
-        item {
-            Text(
-                "Monthly Spending Breakdown (Current Month)",
-                style = MaterialTheme.typography.titleLarge,
-            )
-        }
-
-        state.monthlyCommitmentBreakdown?.let { breakdown ->
-            item {
-                SpendingBreakdownCard(breakdown)
             }
         }
     }
@@ -288,6 +219,48 @@ fun PlanScreen(
                 }
             },
         )
+    }
+}
+
+private enum class PlanSection(val label: String) {
+    BILLS("Bills"),
+    BUDGETS("Budgets"),
+    SPENDING("Spending"),
+}
+
+private fun LazyListScope.billItems(state: FinanceUiState, onEvent: (FinanceEvent) -> Unit) {
+    val bills = state.monthlyBills
+    val canPay = state.selectableAccounts.isNotEmpty() && !bills.cached &&
+        !bills.loading && bills.error == null && bills.payment == null
+    items(bills.occurrences, key = { it.occurrence.id }) { bill ->
+        MonthlyBillCard(
+            bill = bill,
+            today = LocalDate.now(bill.occurrence.timeZone),
+            canPay = canPay,
+            onPay = { onEvent(FinanceEvent.OpenBillPayment(bill.occurrence.id)) },
+        )
+    }
+}
+
+private fun LazyListScope.budgetItems(state: FinanceUiState) {
+    val monthly = state.overallMonthlyBudgetProgress
+    val weekly = state.overallWeeklyBudgetProgress
+    val categoryBudgets = state.categoryBudgetProgresses
+    val error = state.budgetError
+    if (error != null) {
+        item { FinanceMessage(error) }
+        return
+    }
+    if (monthly == null && weekly == null && categoryBudgets.isEmpty() && state.ready) {
+        item { Text("No budgets yet. Set a weekly or monthly limit to track discretionary spending.") }
+    }
+    monthly?.let { item { OverallBudgetCard("Monthly discretionary budget", it) } }
+    weekly?.let { item { OverallBudgetCard("Weekly discretionary budget", it) } }
+    if (categoryBudgets.isNotEmpty()) {
+        item { Text("Category limits", style = MaterialTheme.typography.titleMedium) }
+        categoryBudgets.forEach { (name, progress) ->
+            item { CategoryBudgetCard(name, progress) }
+        }
     }
 }
 
@@ -465,8 +438,8 @@ private fun SpendingBreakdownCard(breakdown: CommitmentBreakdown) {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text(title, style = MaterialTheme.typography.bodyLarge)
-                        Text(lkrText(spent), style = MaterialTheme.typography.bodyLarge)
+                        Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                        Text(lkrText(spent), style = MaterialTheme.typography.titleSmall)
                     }
 
                     LinearProgressIndicator(
