@@ -186,7 +186,7 @@ internal object ExpectedPaymentsStateMapper {
             is Observation.Failed -> observation.lastAvailable?.value.orEmpty()
             Observation.Loading -> emptyList()
         }
-        return withLedger(unfiltered, allPayments, ledger)
+        return withLedger(unfiltered, allPayments, ledger, start, endInclusive)
     }
 
     private fun dataState(
@@ -222,11 +222,13 @@ internal object ExpectedPaymentsStateMapper {
         state: ExpectedPaymentsUiState,
         allPayments: List<ExpectedPayment>,
         ledger: Observation<CompleteLedger>,
+        start: LocalDate,
+        endInclusive: LocalDate,
     ): ExpectedPaymentsUiState = when (ledger) {
         Observation.Loading -> state.copy(loading = true, ledgerLoading = true)
-        is Observation.Data -> reconcile(state, allPayments, ledger.value, loading = false, error = null)
+        is Observation.Data -> reconcile(state, allPayments, ledger.value, start, endInclusive, loading = false, error = null)
         is Observation.Failed -> ledger.lastAvailable?.let { last ->
-            reconcile(state, allPayments, last.value, loading = false, error = ledger.failure)
+            reconcile(state, allPayments, last.value, start, endInclusive, loading = false, error = ledger.failure)
         } ?: state.copy(loading = false, ledgerLoading = false, ledgerError = ledger.failure)
     }
 
@@ -234,6 +236,8 @@ internal object ExpectedPaymentsStateMapper {
         state: ExpectedPaymentsUiState,
         payments: List<ExpectedPayment>,
         ledger: CompleteLedger,
+        start: LocalDate,
+        endInclusive: LocalDate,
         loading: Boolean,
         error: RepositoryFailure?,
     ): ExpectedPaymentsUiState = try {
@@ -241,7 +245,7 @@ internal object ExpectedPaymentsStateMapper {
             loading = state.loading || loading,
             ledgerLoading = loading,
             ledgerError = error,
-            totalsByCurrency = activeExpectedPaymentOutstandingTotalsByCurrency(payments, ledger),
+            totalsByCurrency = activeExpectedPaymentOutstandingTotalsByCurrency(payments, ledger, start, endInclusive),
         )
     } catch (failure: IllegalArgumentException) {
         state.copy(

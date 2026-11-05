@@ -207,6 +207,72 @@ class FoundationCodecTest {
         assertFalse(FoundationCodec.sameExpectedPayment(stored, stored + ("amountDueMinor" to 125_002L)))
     }
 
+    @Test fun expectedPaymentCreateReplayAcceptsCurrentPartialOrCancelledData() {
+        val payment = ExpectedPayment(
+            id = "creation-replay",
+            incomeSourceId = "source",
+            projectLabel = "Website",
+            amountDue = EntryAmount(Money.lkr(10_000L)),
+            dueDate = LocalDate.of(2026, 11, 15),
+        )
+        val request = FoundationCodec.expectedPaymentData(payment)
+        val partial = request + mapOf(
+            "createdAt" to audit,
+            "updatedAt" to audit,
+            "revision" to 1L,
+            "receivedAmountMinor" to 2_500L,
+            "lastReceiptOperationId" to "receipt",
+        )
+        assertTrue(FoundationCodec.sameExpectedPayment(partial, request))
+        val decodedPartial = FoundationCodec.expectedPayment(payment.id, partial)
+        assertEquals(2_500L, decodedPartial.receivedAmountMinor)
+        assertEquals(1L, decodedPartial.metadata.revision)
+
+        val cancelled = partial + mapOf(
+            "state" to "CANCELLED",
+            "cancelledAt" to audit,
+            "cancellationOperationId" to "cancel",
+            "revision" to 2L,
+        )
+        assertTrue(FoundationCodec.sameExpectedPayment(cancelled, request))
+        val decodedCancelled = FoundationCodec.expectedPayment(payment.id, cancelled)
+        assertEquals(ExpectedPaymentState.CANCELLED, decodedCancelled.state)
+        assertEquals(2_500L, decodedCancelled.receivedAmountMinor)
+        assertEquals("receipt", decodedCancelled.lastReceiptOperationId)
+        assertEquals("cancel", decodedCancelled.cancellationOperationId)
+        assertEquals(audit.toDate().toInstant(), decodedCancelled.metadata.createdAt)
+    }
+
+    @Test fun expectedPaymentCreateReplayRejectsChangedOriginalIntent() {
+        val payment = ExpectedPayment(
+            id = "creation-intent",
+            incomeSourceId = "source",
+            projectLabel = "Website",
+            amountDue = EntryAmount(Money.lkr(10_000L)),
+            dueDate = LocalDate.of(2026, 11, 15),
+            milestoneLabel = "First",
+            clientLabel = "Client",
+            notes = "Original note",
+        )
+        val request = FoundationCodec.expectedPaymentData(payment)
+        val changes = mapOf<String, Any>(
+            "incomeSourceId" to "other-source",
+            "projectLabel" to "Other project",
+            "currencyCode" to "USD",
+            "amountDueMinor" to 10_001L,
+            "dueDate" to "2026-11-16",
+            "milestoneLabel" to "Second",
+            "clientLabel" to "Other client",
+            "notes" to "Different note",
+        )
+        changes.forEach { (field, value) ->
+            assertFalse("Changed $field was accepted", FoundationCodec.sameExpectedPayment(
+                request + (field to value), request,
+            ))
+        }
+        assertFalse(FoundationCodec.sameExpectedPayment(request - "notes", request))
+    }
+
     @Test fun expectedPaymentDecoderRejectsMalformedFieldsAndState() {
         val payment = ExpectedPayment(
             id = "expected-payment",

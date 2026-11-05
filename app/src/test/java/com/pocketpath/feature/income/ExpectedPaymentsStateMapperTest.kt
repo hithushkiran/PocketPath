@@ -74,7 +74,7 @@ class ExpectedPaymentsStateMapperTest {
         )
 
         assertEquals(listOf("same-a", "same-b", "late"), state.payments.map(ExpectedPayment::id))
-        assertEquals(Money.lkr(2_100L), state.totalsByCurrency.getValue(FiatCurrency.LKR))
+        assertEquals(Money.lkr(1_100L), state.totalsByCurrency.getValue(FiatCurrency.LKR))
         assertEquals(Money(FiatCurrency.USD, 500L), state.totalsByCurrency.getValue(FiatCurrency.USD))
         assertTrue(state.isPopulated)
         assertNull(state.error)

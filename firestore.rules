@@ -232,6 +232,10 @@ service cloud.firestore {
         && validId(id)
         && data.operationId == id
         && data.kind in ['OPENING', 'EXPENSE', 'INCOME']
+        && (
+          !('expectedPaymentId' in data)
+          || (data.kind == 'INCOME' && validId(data.expectedPaymentId))
+        )
         && data.status == 'POSTED'
         && data.occurredAt is timestamp
         && validDate(data.occurredLocalDate)

@@ -503,9 +503,15 @@ internal object FoundationCodec {
         actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
             expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
 
-    fun sameExpectedPayment(actual: FirestoreFields, expected: FirestoreFields): Boolean =
-        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
-            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
+    /** Compare original creation intent; later receipts/cancellation must not invalidate replay. */
+    fun sameExpectedPayment(actual: FirestoreFields, expected: FirestoreFields): Boolean {
+        val creationFields = setOf(
+            "incomeSourceId", "projectLabel", "currencyCode", "amountDueMinor", "dueDate",
+            "milestoneLabel", "clientLabel", "notes",
+        )
+        return actual.filterKeys { it in creationFields } ==
+            expected.filterKeys { it in creationFields }
+    }
 
     fun sameExpectedPaymentReceipt(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys {

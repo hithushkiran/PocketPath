@@ -143,6 +143,48 @@ class ExpectedPaymentCalculationsTest {
         }
     }
 
+    @Test fun windowedOutstandingTotalsValidateAllReceiptsAndTotalOnlySelectedDates() {
+        val start = LocalDate.of(2026, 10, 10)
+        val end = LocalDate.of(2026, 10, 20)
+        val partial = payment("inside", start, minor = 10_000L)
+            .copy(receivedAmountMinor = 2_500L, lastReceiptOperationId = "inside-receipt")
+        val outside = payment("outside", end.plusDays(1), minor = 20_000L)
+            .copy(receivedAmountMinor = 5_000L, lastReceiptOperationId = "outside-receipt")
+        val paid = payment("paid", end, minor = 5_000L)
+            .copy(receivedAmountMinor = 5_000L, lastReceiptOperationId = "paid-receipt")
+        val cancelled = payment("cancelled", start, minor = 7_000L, state = ExpectedPaymentState.CANCELLED)
+            .copy(receivedAmountMinor = 1_000L, lastReceiptOperationId = "cancelled-receipt")
+        val usd = payment("usd", start.plusDays(1), FiatCurrency.USD, 600L)
+        val payments = listOf(partial, outside, paid, cancelled, usd)
+        val ledger = CompleteLedger(listOf(
+            receipt("inside-receipt", partial, 2_500L),
+            receipt("outside-receipt", outside, 5_000L),
+            receipt("paid-receipt", paid, 5_000L),
+            receipt("cancelled-receipt", cancelled, 1_000L),
+        ))
+
+        val selected = activeExpectedPaymentOutstandingTotalsByCurrency(payments, ledger, start, end)
+        assertEquals(Money.lkr(7_500L), selected.getValue(FiatCurrency.LKR))
+        assertEquals(Money(FiatCurrency.USD, 600L), selected.getValue(FiatCurrency.USD))
+        assertEquals(Money.lkr(22_500L), activeExpectedPaymentOutstandingTotalsByCurrency(
+            payments, ledger,
+        ).getValue(FiatCurrency.LKR))
+    }
+
+    @Test fun windowedTotalsRejectInvalidWindowAndOutOfWindowProjectionDrift() {
+        val start = LocalDate.of(2026, 10, 10)
+        val end = LocalDate.of(2026, 10, 20)
+        val outside = payment("outside", end.plusDays(1), minor = 20_000L)
+            .copy(receivedAmountMinor = 5_001L)
+        val ledger = CompleteLedger(listOf(receipt("outside-receipt", outside, 5_000L)))
+        assertThrows(IllegalArgumentException::class.java) {
+            activeExpectedPaymentOutstandingTotalsByCurrency(listOf(outside), ledger, start, end)
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            activeExpectedPaymentOutstandingTotalsByCurrency(emptyList(), CompleteLedger(emptyList()), end, start)
+        }
+    }
+
     private fun receipt(id: String, payment: ExpectedPayment, minor: Long): FinancialTransaction {
         val currency = payment.amountDue.money.currency
         val amount = Money(currency, minor)

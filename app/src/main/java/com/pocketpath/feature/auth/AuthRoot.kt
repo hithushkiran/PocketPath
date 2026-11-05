@@ -118,6 +118,9 @@ fun AuthRoot(
                     onExpectedPaymentReceipt = { payment, accountId, amount ->
                         expectedPaymentsViewModel.recordReceipt(current.user.uid, payment, accountId, amount)
                     },
+                    onExpectedPaymentReceivingAccountSelected = { accountId ->
+                        expectedPaymentsViewModel.selectReceivingAccount(current.user.uid, accountId)
+                    },
                     expectedPaymentCreationState = visibleExpectedPaymentCreation,
                     onExpectedPaymentCreationEvent = { expectedPaymentCreationViewModel.onEvent(current.user.uid, it) },
                 )

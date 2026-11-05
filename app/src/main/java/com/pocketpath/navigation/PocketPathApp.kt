@@ -95,6 +95,7 @@ fun PocketPathApp(
     expectedPaymentsState: ExpectedPaymentsUiState = ExpectedPaymentsUiState(),
     onExpectedPaymentCancel: (ExpectedPayment) -> Unit = {},
     onExpectedPaymentReceipt: (ExpectedPayment, String?, String) -> Unit = { _, _, _ -> },
+    onExpectedPaymentReceivingAccountSelected: (String?) -> Unit = {},
     expectedPaymentCreationState: ExpectedPaymentCreationUiState = ExpectedPaymentCreationUiState(loading = false),
     onExpectedPaymentCreationEvent: (ExpectedPaymentCreationEvent) -> Unit = {},
 ) {
@@ -249,6 +250,7 @@ fun PocketPathApp(
                     onCreate = { navController.navigate(CreateExpectedPayment) { launchSingleTop = true } },
                     onCancel = onExpectedPaymentCancel,
                     onRecordReceipt = onExpectedPaymentReceipt,
+                    onSelectReceivingAccount = onExpectedPaymentReceivingAccountSelected,
                 )
             }
             composable<CreateExpectedPayment> {

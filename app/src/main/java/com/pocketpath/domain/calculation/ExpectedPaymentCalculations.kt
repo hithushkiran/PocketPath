@@ -67,7 +67,10 @@ fun activeExpectedPaymentTotalsByCurrency(
 fun activeExpectedPaymentOutstandingTotalsByCurrency(
     payments: Iterable<ExpectedPayment>,
     ledger: CompleteLedger,
+    start: LocalDate = LocalDate.MIN,
+    endInclusive: LocalDate = LocalDate.MAX,
 ): Map<FiatCurrency, Money> {
+    require(endInclusive >= start) { "Expected-payment window ends before it starts." }
     require(ledger.scope == LedgerScope.AllEvents) {
         "Expected-payment totals require complete user event scope."
     }
@@ -111,6 +114,7 @@ fun activeExpectedPaymentOutstandingTotalsByCurrency(
 
     return snapshot.asSequence()
         .filter { it.state == ExpectedPaymentState.ACTIVE }
+        .filter { it.dueDate in start..endInclusive }
         .groupBy { it.amountDue.money.currency }
         .toSortedMap(compareBy(FiatCurrency::code))
         .mapValues { (currency, currencyPayments) ->
