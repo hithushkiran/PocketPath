@@ -374,6 +374,9 @@ internal object FoundationCodec {
         )
     }
 
+    private val incomeComponentKeys = setOf("nature", "amountLkrMinor", "incomeSourceId")
+    private val convertedUsdKeys = setOf("originalCurrency", "originalAmountMinor", "valuationRate", "rateSource")
+
     fun eventData(event: FinancialTransaction): Map<String, Any> {
         checkId(event.id)
         require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE))
@@ -419,12 +422,25 @@ internal object FoundationCodec {
                 val component = event.components.single()
                 require(component.nature == ComponentNature.EARNING)
                 require(component.categoryId == null && component.commitmentClass == null)
-                require(component.originalAmount == null && component.valuationRate == null && component.rateSnapshotId == null)
+                require(component.rateSnapshotId == null)
                 val sourceId = requireNotNull(component.incomeSourceId).also(::checkId)
                 val amountLkr = component.lkrAmount as? KnownLkrAmount.Known
                     ?: error("Manual income must have a known LKR amount")
                 require(amountLkr.amount == amount.money)
-                listOf(mapOf("nature" to component.nature.name, "amountLkrMinor" to amountLkr.amount.minor, "incomeSourceId" to sourceId))
+                listOf(buildMap<String, Any> {
+                    put("nature", component.nature.name)
+                    put("amountLkrMinor", amountLkr.amount.minor)
+                    put("incomeSourceId", sourceId)
+                    component.originalAmount?.let { original ->
+                        require(event.expectedPaymentId == null)
+                        require(original is NativeAmount.Fiat && original.money.currency == FiatCurrency.USD)
+                        require(original.money.minor > 0)
+                        put("originalCurrency", FiatCurrency.USD.code)
+                        put("originalAmountMinor", original.money.minor)
+                        put("valuationRate", usdReceiptRateText(requireNotNull(component.valuationRate)))
+                        put("rateSource", ValuationSource.MANUAL_ACTUAL.name)
+                    }
+                })
             }
             else -> event.components.map { component ->
                 require(component.nature == ComponentNature.SPENDING)
@@ -543,9 +559,24 @@ internal object FoundationCodec {
         val components = data.maps("components").map { component ->
             val amountLkr = KnownLkrAmount.Known(Money.lkr(component.integer("amountLkrMinor")))
             if (kind == TransactionKind.INCOME) {
-                component.checkKeys(setOf("nature", "amountLkrMinor", "incomeSourceId"))
+                component.checkKeys(incomeComponentKeys, convertedUsdKeys)
                 require(component.text("nature") == "EARNING")
-                ReportComponent(ComponentNature.EARNING, amountLkr, incomeSourceId = component.text("incomeSourceId").also(::checkId))
+                val hasConversion = component.keys.any { it in convertedUsdKeys }
+                val original = if (hasConversion) {
+                    require("expectedPaymentId" !in data)
+                    require(component.text("originalCurrency") == FiatCurrency.USD.code)
+                    require(component.text("rateSource") == ValuationSource.MANUAL_ACTUAL.name)
+                    NativeAmount.Fiat(EntryAmount(Money(FiatCurrency.USD, component.integer("originalAmountMinor"))).money)
+                } else null
+                val rate = if (hasConversion) {
+                    val stored = component.text("valuationRate")
+                    parseUsdReceiptRate(stored).also { require(usdReceiptRateText(it) == stored) }
+                } else null
+                ReportComponent(
+                    ComponentNature.EARNING, amountLkr,
+                    incomeSourceId = component.text("incomeSourceId").also(::checkId),
+                    originalAmount = original, valuationRate = rate,
+                )
             } else {
                 component.checkKeys(setOf("nature", "amountLkrMinor", "categoryId", "commitmentClass"))
                 require(component.text("nature") == "SPENDING")

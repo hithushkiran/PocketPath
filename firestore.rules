@@ -337,13 +337,37 @@ service cloud.firestore {
         && get(category).data.get('archivedAt', null) == null;
     }
 
+    // Split the rate before multiplying to keep every intermediate within int64.
+    function validUsdReceiptRounding(component) {
+      let parts = component.valuationRate.split('[.]');
+      let original = component.originalAmountMinor;
+      let roundedFraction = component.amountLkrMinor - original * int(parts[0]);
+      let scaledFraction = original * int(parts[1]);
+      return roundedFraction >= 0 && roundedFraction <= original
+        && scaledFraction >= roundedFraction * 1000000 - 500000
+        && scaledFraction < roundedFraction * 1000000 + 500000;
+    }
+
+    function validConvertedUsdIncome(data, component, source) {
+      return !('expectedPaymentId' in data)
+        && source.kind == 'ADSENSE'
+        && component.originalCurrency == 'USD'
+        && component.rateSource == 'MANUAL_ACTUAL'
+        && component.originalAmountMinor is int
+        && component.originalAmountMinor > 0 && component.originalAmountMinor <= 100000000000
+        && component.valuationRate is string
+        && component.valuationRate.matches('([0-9]|[1-9][0-9]{1,3})[.][0-9]{6}')
+        && validUsdReceiptRounding(component);
+    }
+
     function validIncome(uid, data) {
       let movement = data.movements[0];
       let component = data.components[0];
       let account = accountPath(uid, movement.accountId);
-      let source = incomeSourcePath(uid, component.incomeSourceId);
+      let source = get(incomeSourcePath(uid, component.incomeSourceId)).data;
       return data.components.size() == 1
-        && fields(component, ['nature', 'amountLkrMinor', 'incomeSourceId'], [])
+        && fields(component, ['nature', 'amountLkrMinor', 'incomeSourceId'],
+          ['originalCurrency', 'originalAmountMinor', 'valuationRate', 'rateSource'])
         && component.nature == 'EARNING'
         && component.amountLkrMinor is int
         && component.amountLkrMinor > 0
@@ -358,9 +382,10 @@ service cloud.firestore {
         && get(account).data.assetClass == 'FIAT'
         && get(account).data.scale == 2
         && get(account).data.get('archivedAt', null) == null
-        && exists(source)
-        && get(source).data.get('archivedAt', null) == null
-        && (!('defaultCurrencyCode' in get(source).data) || get(source).data.defaultCurrencyCode == 'LKR');
+        && source.get('archivedAt', null) == null
+        && source.get('defaultCurrencyCode', 'LKR') == 'LKR'
+        && (component.keys().hasOnly(['nature', 'amountLkrMinor', 'incomeSourceId'])
+          || validConvertedUsdIncome(data, component, source));
     }
 
     function validIncomeExpectedLink(uid, transactionId, data) {

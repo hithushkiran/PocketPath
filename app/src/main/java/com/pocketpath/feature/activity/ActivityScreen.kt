@@ -51,6 +51,7 @@ fun ActivityScreen(
             val title = when (event.kind) {
                 TransactionKind.OPENING -> "Opening balance"
                 TransactionKind.GOAL_RESERVE -> "Goal contribution"
+                TransactionKind.INCOME -> "Income"
                 TransactionKind.EXPENSE -> {
                     val categoryId = event.components.firstOrNull()?.categoryId
                     val name = state.categories.firstOrNull {
@@ -107,6 +108,14 @@ fun ActivityScreen(
                     }
 
                     reservation?.let { Text("${lkrText(it.amountLkr.minor)} reserved") }
+                    event.components.singleOrNull()?.let { component ->
+                        val original = component.originalAmount
+                        val rate = component.valuationRate
+                        if (event.kind == TransactionKind.INCOME && original != null && rate != null) {
+                            Text("Original amount: ${original.asset.code} ${original.major().toPlainString()}")
+                            Text("Applied receipt rate: ${rate.lkrPerMajor.stripTrailingZeros().toPlainString()} LKR per ${original.asset.code}")
+                        }
+                    }
                     accountName?.let { Text(it) }
                     Text(event.financialTime.occurredLocalDate.toString())
                     event.note?.let { Text(it) }

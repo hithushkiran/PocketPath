@@ -198,6 +198,7 @@ fun PocketPathApp(
             composable<Home> {
                 HomeScreen(
                     state = financeState,
+                    incomeSources = incomeState.sources,
                     onEvent = onFinanceEvent,
                     onAccounts = {
                         navController.navigate(Accounts) { launchSingleTop = true }

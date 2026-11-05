@@ -1,5 +1,6 @@
 package com.pocketpath.domain.calculation
 
+import com.pocketpath.domain.model.ComponentNature
 import com.pocketpath.domain.model.MonthlyBill
 import com.pocketpath.domain.model.TransactionKind
 import com.pocketpath.domain.model.TransactionStatus
@@ -16,6 +17,7 @@ data class HomeLedgerSummary(
     val reservedByAccount: Map<String, Long>,
     val reservedByGoal: Map<String, Long>,
     val billPaymentsByOccurrence: Map<String, Long>,
+    val receivedBySourceMinor: Map<String, Long>,
 )
 
 fun summarizeHomeLedger(ledger: CompleteLedger, date: LocalDate, zone: ZoneId): HomeLedgerSummary {
@@ -23,6 +25,8 @@ fun summarizeHomeLedger(ledger: CompleteLedger, date: LocalDate, zone: ZoneId): 
     val reservedByAccount = mutableMapOf<String, Long>()
     val reservedByGoal = mutableMapOf<String, Long>()
     val billPayments = mutableMapOf<String, Long>()
+    val receivedBySource = mutableMapOf<String, Long>()
+    val period = ReportPeriod(date.withDayOfMonth(1), date, zone)
     for (event in ledger.events) {
         if (event.status != TransactionStatus.POSTED) continue
         for (effect in event.reservationEffects) {
@@ -33,17 +37,23 @@ fun summarizeHomeLedger(ledger: CompleteLedger, date: LocalDate, zone: ZoneId): 
                 reservedByGoal[effect.goalId] ?: 0L, effect.amountLkr.minor,
             )
         }
+        if (event.kind == TransactionKind.INCOME && period.contains(event)) {
+            for (component in event.components) {
+                if (component.nature != ComponentNature.EARNING) continue
+                val sourceId = requireNotNull(component.incomeSourceId)
+                val amount = (component.lkrAmount as KnownLkrAmount.Known).amount.minor
+                receivedBySource[sourceId] = Math.addExact(receivedBySource[sourceId] ?: 0L, amount)
+            }
+        }
         val occurrenceId = event.occurrenceId ?: continue
         if (event.kind != TransactionKind.EXPENSE) continue
         val amount = (event.components.single().lkrAmount as KnownLkrAmount.Known).amount.minor
         billPayments[occurrenceId] = Math.addExact(billPayments[occurrenceId] ?: 0L, amount)
     }
-    val reports = periodReportTotals(
-        ledger, ReportPeriod(date.withDayOfMonth(1), date, zone),
-    )
+    val reports = periodReportTotals(ledger, period)
     return HomeLedgerSummary(
         date, reports.earningsLkrMinor, reports.netSpendingLkrMinor, reservedByAccount.toMap(),
-        reservedByGoal.toMap(), billPayments.toMap(),
+        reservedByGoal.toMap(), billPayments.toMap(), receivedBySource.toMap(),
     )
 }
 

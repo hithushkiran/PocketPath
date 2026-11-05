@@ -610,3 +610,61 @@ test('goal contribution and backing revision must commit together under one owne
   assert.equal(backing.openingTransactionId, 'opening-bank');
   assert.equal(backing.lastGoalReserveId, reservation.operationId);
 });
+
+async function createAdSenseSource() {
+  await assertSucceeds(setDoc(doc(db, root, 'incomeSources', 'adsense'), {
+    name: 'AdSense', kind: 'ADSENSE', defaultCurrencyCode: 'LKR',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0,
+  }));
+}
+
+function convertedUsdEvent(id, credit = 301, overrides = {}) {
+  const receipt = event(id, 'INCOME', credit);
+  return {
+    ...receipt,
+    incomeSourceIds: ['adsense'],
+    components: [{
+      ...receipt.components[0],
+      incomeSourceId: 'adsense',
+      originalCurrency: 'USD', originalAmountMinor: 1,
+      valuationRate: '300.500000', rateSource: 'MANUAL_ACTUAL',
+      ...overrides,
+    }],
+  };
+}
+
+test('converted AdSense receipt credits only correctly rounded LKR and retains immutable USD details', async () => {
+  await createAdSenseSource();
+  const ref = eventRef('converted-adsense');
+  await assertSucceeds(setDoc(ref, convertedUsdEvent(ref.id)));
+  const saved = (await getDoc(ref)).data();
+  assert.equal(saved.movements.length, 1);
+  assert.equal(saved.movements[0].currencyCode, 'LKR');
+  assert.equal(saved.movements[0].amountMinor, 301);
+  assert.equal(saved.components[0].originalAmountMinor, 1);
+  assert.equal(saved.components[0].valuationRate, '300.500000');
+  assert.equal(saved.components[0].rateSource, 'MANUAL_ACTUAL');
+  await assertFails(updateDoc(ref, { components: convertedUsdEvent(ref.id, 301, { valuationRate: '300.600000' }).components }));
+});
+
+test('USD metadata cannot bypass source, ownership, precision, credit or receipt-link checks', async () => {
+  await createAdSenseSource();
+  const receipt = convertedUsdEvent('rejected-conversion');
+  const component = receipt.components[0];
+  const { rateSource, ...partial } = component;
+  for (const invalid of [
+    convertedUsdEvent(receipt.operationId, 300),
+    { ...receipt, components: [partial] },
+    { ...receipt, incomeSourceIds: ['source'], components: [{ ...component, incomeSourceId: 'source' }] },
+    convertedUsdEvent(receipt.operationId, 301, { valuationRate: '300.5000001' }),
+    convertedUsdEvent(receipt.operationId, 301, { valuationRate: '0300.500000' }),
+    convertedUsdEvent(receipt.operationId, 301, { valuationRate: '9999.999999', originalAmountMinor: 100_000_000_000 }),
+    { ...receipt, expectedPaymentId: 'payment' },
+  ]) {
+    await assertFails(setDoc(eventRef(receipt.operationId), invalid));
+  }
+  const other = environment.authenticatedContext('other-user').firestore();
+  await assertFails(setDoc(eventRef(receipt.operationId, other), receipt));
+  assert.equal((await getDoc(eventRef(receipt.operationId))).exists(), false);
+  assert.equal((await getDoc(paymentRef())).data().receivedAmountMinor, 0);
+});

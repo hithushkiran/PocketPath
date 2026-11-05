@@ -10,6 +10,7 @@ import com.pocketpath.data.firebase.UserCollection
 import com.pocketpath.data.firebase.UserFirestorePaths
 import com.pocketpath.data.firebase.UserFirestoreScope
 import com.pocketpath.domain.model.IncomeSource
+import com.pocketpath.domain.model.IncomeSourceKind
 import com.pocketpath.domain.calculation.ExpectedPaymentCancellationDecision
 import com.pocketpath.domain.calculation.expectedPaymentCancellationDecision
 import com.pocketpath.domain.calculation.ExpectedPaymentReceiptAllocation
@@ -308,7 +309,7 @@ class FirebaseIncomeRepository internal constructor(
 
     override suspend fun recordIncome(event: FinancialTransaction): CommandResult<FinancialTransaction> = try {
         requireSession()
-        requireManualLkrIncome(event)
+        requireManualIncome(event)
         val expected = FoundationCodec.eventData(event)
         val eventReference = transactions.document(event.id)
         val result = firestore.runTransaction { transaction ->
@@ -333,6 +334,9 @@ class FirebaseIncomeRepository internal constructor(
                     (decodedSource.defaultCurrency != null && decodedSource.defaultCurrency != FiatCurrency.LKR)
                 ) {
                     throw IncomeSourceProblem(FailureCode.REJECTED, "Income source is not eligible for LKR income.", event.id)
+                }
+                if (event.components.single().originalAmount != null && decodedSource.kind != IncomeSourceKind.ADSENSE) {
+                    throw IncomeSourceProblem(FailureCode.VALIDATION, "Converted USD receipts require an AdSense source.", event.id)
                 }
                 transaction.set(eventReference, expected)
                 FirebaseIncomeApplied(event, false)
@@ -465,7 +469,7 @@ class FirebaseIncomeRepository internal constructor(
         com.pocketpath.domain.repository.ReceiptInspection.Unavailable(error.failure(operationId))
     }
 
-    private fun requireManualLkrIncome(event: FinancialTransaction) {
+    private fun requireManualIncome(event: FinancialTransaction) {
         require(event.kind == TransactionKind.INCOME && event.status == TransactionStatus.POSTED)
         require(event.movements.size == 1 && event.components.size == 1)
         require(event.reservationEffects.isEmpty() && event.valuations.isEmpty())
@@ -479,7 +483,8 @@ class FirebaseIncomeRepository internal constructor(
     }
 
     private fun requireExpectedPaymentReceipt(event: FinancialTransaction) {
-        requireManualLkrIncome(event.copyExpectedPaymentForValidation())
+        requireManualIncome(event.copyExpectedPaymentForValidation())
+        require(event.components.single().originalAmount == null)
         requireNotNull(event.expectedPaymentId).also(FoundationCodec::checkId)
     }
 

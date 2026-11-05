@@ -105,6 +105,17 @@ data class ValuationRate(val lkrPerMajor: BigDecimal) {
     companion object { fun fromDecimalString(value: String) = ValuationRate(BigDecimal(value)) }
 }
 
+/** Manual USD-to-LKR receipts store a canonical decimal string at six-place precision. */
+fun parseUsdReceiptRate(text: String): ValuationRate =
+    ValuationRate.fromDecimalString(usdReceiptRateText(ValuationRate(enteredDecimal(text, 6))))
+
+fun usdReceiptRateText(rate: ValuationRate): String {
+    require(rate.lkrPerMajor < BigDecimal("10000") && rate.lkrPerMajor.scale() <= 6) {
+        "Enter a rate below 10000 with at most six decimal places."
+    }
+    return rate.lkrPerMajor.setScale(6).toPlainString()
+}
+
 /** BR-11: round HALF_UP only once, after multiplication and conversion to LKR minor units. */
 fun historicalLkrValue(amount: NativeAmount, rate: ValuationRate): Money = Money.lkr(
     amount.major().multiply(rate.lkrPerMajor).movePointRight(2)
