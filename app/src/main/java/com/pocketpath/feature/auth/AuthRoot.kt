@@ -93,7 +93,8 @@ fun AuthRoot(
                         ?.let { stringResource(it) }
                         ?: visibleFinance.localError,
                     onSignOut = {
-                        if (visibleFinance.hasUnresolvedLocalWork || visibleIncome.hasUnresolvedIncomeWork ||
+                        if (visibleFinance.hasUnresolvedLocalWork || visibleFinance.monthlyBills.hasUnresolvedSave ||
+                            visibleIncome.hasUnresolvedIncomeWork ||
                             visibleIncome.hasUnresolvedSourceWork ||
                             visibleExpectedPayments.hasUnresolvedCancellationRetry || visibleExpectedPayments.receiptRecovery.hasWork
                         ) {
@@ -159,6 +160,11 @@ fun AuthRoot(
                                             "for this account. You may need to sign back in to " +
                                             "finish synchronization.",
                                     )
+                                }
+                                if (visibleFinance.monthlyBills.hasUnresolvedSave) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append("A bill save may already have reached the server. Signing out discards " +
+                                        "its retry details. Check Plan after signing back in before adding it again.")
                                 }
                                 if (visibleIncome.hasUnresolvedIncomeWork) {
                                     if (isNotEmpty()) append("\n\n")

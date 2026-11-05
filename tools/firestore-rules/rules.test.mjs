@@ -389,3 +389,80 @@ test('income receipts and openings cannot be voided and already-voided expenses 
   await assertFails(setDoc(eventRef('born-void'), { ...event('born-void', 'EXPENSE', -50_000), ...voidPatch() }));
   assert.equal((await getDoc(eventRef('born-void'))).exists(), false);
 });
+
+const billId = 'monthly-rent';
+const billDate = '2026-11-30';
+const billOccurrenceId = `${billId}_${billDate}`;
+const billScheduleRef = (client = db) => doc(client, root, 'schedules', billId);
+const billOccurrenceRef = (client = db, id = billOccurrenceId) => doc(client, root, 'occurrences', id);
+
+function monthlyBillPair() {
+  const common = {
+    kind: 'COMMITMENT', timeZone: 'Asia/Colombo', currencyCode: 'LKR',
+    expectedAmountMinor: 3_400_000, categoryId: 'food', commitmentClass: 'COMMITTED',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0,
+  };
+  return {
+    schedule: {
+      ...common, title: 'Rent', frequency: 'MONTHLY', interval: 1,
+      anchorDate: billDate, activeFrom: billDate, amountMode: 'FIXED', paused: false, reminderLeadDays: 0,
+    },
+    occurrence: {
+      ...common, scheduleId: billId, nominalDate: billDate, effectiveDueDate: billDate,
+      titleSnapshot: 'Rent', state: 'OPEN',
+    },
+  };
+}
+
+function writeMonthlyBill({ schedule, occurrence }, client = db, occurrenceId = billOccurrenceId) {
+  const batch = writeBatch(client);
+  batch.set(billScheduleRef(client), schedule);
+  batch.set(billOccurrenceRef(client, occurrenceId), occurrence);
+  return batch.commit();
+}
+
+test('owner can create a fixed monthly bill and its first due occurrence together', async () => {
+  const before = (await getDocs(collection(db, root, 'transactions'))).size;
+  await assertSucceeds(writeMonthlyBill(monthlyBillPair()));
+  const schedule = (await getDoc(billScheduleRef())).data();
+  const occurrence = (await getDoc(billOccurrenceRef())).data();
+  assert.equal(schedule.frequency, 'MONTHLY');
+  assert.equal(occurrence.state, 'OPEN');
+  assert.equal(occurrence.effectiveDueDate, billDate);
+  assert.equal(occurrence.expectedAmountMinor, 3_400_000);
+  assert.ok(schedule.createdAt instanceof Timestamp);
+  assert.deepEqual(schedule.createdAt, occurrence.createdAt);
+  assert.equal((await getDocs(collection(db, root, 'transactions'))).size, before);
+});
+
+test('bill rules reject incomplete pairs, altered snapshots and unowned categories', async () => {
+  const { schedule, occurrence } = monthlyBillPair();
+  await assertFails(setDoc(billScheduleRef(), schedule));
+  await assertFails(setDoc(billOccurrenceRef(), occurrence));
+  await assertFails(writeMonthlyBill({ schedule, occurrence }, db, 'wrong-occurrence-id'));
+  for (const overrides of [
+    { expectedAmountMinor: 1 },
+    { effectiveDueDate: '2026-12-01' },
+    { titleSnapshot: 'Different title' },
+  ]) {
+    await assertFails(writeMonthlyBill({ schedule, occurrence: { ...occurrence, ...overrides } }));
+  }
+  await assertFails(writeMonthlyBill({
+    schedule: { ...schedule, categoryId: 'missing' },
+    occurrence: { ...occurrence, categoryId: 'missing' },
+  }));
+  assert.equal((await getDocs(collection(db, root, 'schedules'))).size, 0);
+  assert.equal((await getDocs(collection(db, root, 'occurrences'))).size, 0);
+});
+
+test('bill pairs are owner-only and immutable after creation', async () => {
+  const other = environment.authenticatedContext('other-user').firestore();
+  await assertFails(writeMonthlyBill(monthlyBillPair(), other));
+  await assertSucceeds(writeMonthlyBill(monthlyBillPair()));
+  await assertFails(getDoc(billScheduleRef(other)));
+  await assertFails(getDoc(billOccurrenceRef(other)));
+  await assertFails(updateDoc(billScheduleRef(), { title: 'Edited' }));
+  await assertFails(updateDoc(billOccurrenceRef(), { state: 'CONFIRMED' }));
+  await assertFails(deleteDoc(billScheduleRef()));
+  await assertFails(deleteDoc(billOccurrenceRef()));
+});

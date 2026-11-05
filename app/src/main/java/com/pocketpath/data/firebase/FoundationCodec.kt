@@ -544,6 +544,79 @@ internal object FoundationCodec {
         )
     }
 
+    /** The first fixed monthly LKR bill and its first due occurrence share one immutable save. */
+    fun firstMonthlyBillData(schedule: Schedule): Pair<Map<String, Any>, Map<String, Any>> {
+        checkId(schedule.id)
+        val categoryId = requireNotNull(schedule.categoryId).also(::checkId)
+        val date = schedule.recurrence.anchorDate
+        require(schedule.kind == ScheduleKind.COMMITMENT && schedule.recurrence.frequency == Frequency.MONTHLY)
+        require(schedule.activeFrom == date && date.year in 0..9999 && schedule.endDate == null)
+        require(schedule.title.isNotBlank() && schedule.title.length <= 80)
+        require(schedule.expectedAmount.money.currency == FiatCurrency.LKR && schedule.amountMode == AmountMode.FIXED)
+        require(schedule.timeZone.id == "Asia/Colombo" && schedule.commitmentClass == CommitmentClass.COMMITTED)
+        require(schedule.metadata == RecordMetadata() && !schedule.paused)
+        require(schedule.preferredAccountId == null && schedule.remindLocalTime == null && schedule.reminderLeadDays == 0)
+
+        val shared = mapOf(
+            "kind" to ScheduleKind.COMMITMENT.name,
+            "timeZone" to schedule.timeZone.id,
+            "expectedAmountMinor" to schedule.expectedAmount.money.minor,
+            "currencyCode" to FiatCurrency.LKR.code,
+            "categoryId" to categoryId,
+            "commitmentClass" to CommitmentClass.COMMITTED.name,
+            "createdAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp(),
+            "revision" to 0L,
+        )
+        val scheduleData = shared + mapOf(
+            "title" to schedule.title,
+            "frequency" to Frequency.MONTHLY.name,
+            "interval" to 1L,
+            "anchorDate" to date.toString(),
+            "activeFrom" to date.toString(),
+            "amountMode" to AmountMode.FIXED.name,
+            "paused" to false,
+            "reminderLeadDays" to 0L,
+        )
+        val occurrenceData = shared + mapOf(
+            "scheduleId" to schedule.id,
+            "nominalDate" to date.toString(),
+            "effectiveDueDate" to date.toString(),
+            "titleSnapshot" to schedule.title,
+            "state" to OccurrenceState.OPEN.name,
+        )
+        return scheduleData to occurrenceData
+    }
+
+    fun firstMonthlyBill(id: String, data: FirestoreFields): Occurrence {
+        data.checkKeys(setOf(
+            "scheduleId", "nominalDate", "effectiveDueDate", "kind", "titleSnapshot",
+            "expectedAmountMinor", "currencyCode", "timeZone", "categoryId", "commitmentClass",
+            "state", "createdAt", "updatedAt", "revision",
+        ))
+        val scheduleId = data.text("scheduleId").also(::checkId)
+        val nominal = LocalDate.parse(data.text("nominalDate"))
+        require(id == StableIds.occurrence(scheduleId, nominal))
+        require(nominal.year in 0..9999 && data.text("effectiveDueDate") == nominal.toString())
+        require(data.text("kind") == ScheduleKind.COMMITMENT.name && data.text("state") == OccurrenceState.OPEN.name)
+        require(data.text("currencyCode") == FiatCurrency.LKR.code && data.text("timeZone") == "Asia/Colombo")
+        require(data.text("commitmentClass") == CommitmentClass.COMMITTED.name && data.integer("revision") == 0L)
+        val title = data.text("titleSnapshot")
+        require(title.isNotBlank() && title.length <= 80)
+        return Occurrence(
+            scheduleId = scheduleId,
+            nominalDate = nominal,
+            effectiveDueDate = nominal,
+            kind = ScheduleKind.COMMITMENT,
+            titleSnapshot = title,
+            expectedAmount = EntryAmount(Money.lkr(data.integer("expectedAmountMinor"))),
+            timeZone = ZoneId.of(data.text("timeZone")),
+            categoryId = data.text("categoryId").also(::checkId),
+            commitmentClass = CommitmentClass.COMMITTED,
+            metadata = RecordMetadata(createdAt = data.instant("createdAt"), updatedAt = data.instant("updatedAt")),
+        )
+    }
+
     fun budgetData(budget: Budget): Map<String, Any> {
         checkId(budget.id)
         require(budget.metadata == RecordMetadata() && budget.state == BudgetState.ACTIVE)

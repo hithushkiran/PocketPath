@@ -284,6 +284,41 @@ class FirebaseFoundationRepository internal constructor(
         )
     }
 
+    fun observeMonthlyBills(): Flow<Observation<List<Occurrence>>> = observeQuery(
+        query = { owned.collection(UserCollection.OCCURRENCES).whereEqualTo("kind", ScheduleKind.COMMITMENT.name).limit(5001) },
+        completeHistory = false,
+        coverageKey = "monthly-bills-v1",
+    ) { snapshot ->
+        snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
+            .map { FoundationCodec.firstMonthlyBill(it.id, requireNotNull(it.data)) }
+            .sortedWith(compareBy(Occurrence::effectiveDueDate, Occurrence::id))
+    }
+
+    /** Online configuration write. Replaying the same pair never creates a second bill. */
+    suspend fun saveMonthlyBill(schedule: Schedule): CommandResult<Unit> = command(schedule.id) {
+        val (scheduleData, occurrenceData) = FoundationCodec.firstMonthlyBillData(schedule)
+        val scheduleRef = owned.collection(UserCollection.SCHEDULES).document(schedule.id)
+        val occurrenceId = StableIds.occurrence(schedule.id, schedule.recurrence.anchorDate)
+        val occurrenceRef = owned.collection(UserCollection.OCCURRENCES).document(occurrenceId)
+        val auditFields = setOf("createdAt", "updatedAt")
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val existingSchedule = transaction.get(scheduleRef)
+            val existingOccurrence = transaction.get(occurrenceRef)
+            if (existingSchedule.exists() || existingOccurrence.exists()) {
+                if (existingSchedule.data?.filterKeys { it !in auditFields } != scheduleData.filterKeys { it !in auditFields } ||
+                    existingOccurrence.data?.filterKeys { it !in auditFields } != occurrenceData.filterKeys { it !in auditFields }
+                ) throw conflict()
+                true
+            } else {
+                transaction.set(scheduleRef, scheduleData)
+                transaction.set(occurrenceRef, occurrenceData)
+                false
+            }
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
     suspend fun voidExpense(
         operationId: String,
         transactionId: String,

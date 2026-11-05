@@ -464,6 +464,61 @@ service cloud.firestore {
         && after.diff(before).affectedKeys().hasOnly(['status', 'voidMetadata', 'updatedAt', 'revision']);
     }
 
+    function billSchedulePath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/schedules/$(id);
+    }
+
+    function billOccurrencePath(uid, id) {
+      return /databases/$(database)/documents/users/$(uid)/occurrences/$(id);
+    }
+
+    function validFirstMonthlyBill(uid, scheduleId, data) {
+      return fields(data, [
+          'kind', 'title', 'frequency', 'interval', 'anchorDate', 'timeZone',
+          'expectedAmountMinor', 'currencyCode', 'amountMode', 'categoryId', 'commitmentClass',
+          'activeFrom', 'paused', 'reminderLeadDays', 'createdAt', 'updatedAt', 'revision'
+        ], [])
+        && data.kind == 'COMMITMENT'
+        && nonBlank(data.title) && data.title.size() <= 80
+        && data.frequency == 'MONTHLY' && data.interval is int && data.interval == 1
+        && validDate(data.anchorDate) && data.activeFrom == data.anchorDate
+        && data.timeZone == 'Asia/Colombo' && data.currencyCode == 'LKR'
+        && data.expectedAmountMinor is int && data.expectedAmountMinor > 0
+        && data.expectedAmountMinor <= 100000000000 && data.amountMode == 'FIXED'
+        && validId(data.categoryId) && data.commitmentClass == 'COMMITTED'
+        && exists(categoryPath(uid, data.categoryId))
+        && get(categoryPath(uid, data.categoryId)).data.get('archivedAt', null) == null
+        && data.paused == false && data.reminderLeadDays is int && data.reminderLeadDays == 0
+        && data.createdAt == request.time && data.updatedAt == request.time
+        && data.revision is int && data.revision == 0
+        && firstBillOccurrenceIsNew(uid, scheduleId + '_' + data.anchorDate);
+    }
+
+    function firstBillOccurrenceIsNew(uid, occurrenceId) {
+      let path = billOccurrencePath(uid, occurrenceId);
+      return !exists(path) && existsAfter(path);
+    }
+
+    function validFirstBillOccurrence(uid, occurrenceId, data) {
+      let path = billSchedulePath(uid, data.scheduleId);
+      let schedule = getAfter(path).data;
+      // A new schedule must be part of the same write, and its create rule validates it.
+      return !exists(path)
+        && fields(data, [
+          'scheduleId', 'nominalDate', 'effectiveDueDate', 'kind', 'titleSnapshot',
+          'expectedAmountMinor', 'currencyCode', 'timeZone', 'categoryId', 'commitmentClass',
+          'state', 'createdAt', 'updatedAt', 'revision'
+        ], [])
+        && occurrenceId == data.scheduleId + '_' + schedule.anchorDate
+        && data.nominalDate == schedule.anchorDate && data.effectiveDueDate == data.nominalDate
+        && data.kind == schedule.kind && data.titleSnapshot == schedule.title
+        && data.expectedAmountMinor is int && data.expectedAmountMinor == schedule.expectedAmountMinor
+        && data.currencyCode == schedule.currencyCode && data.timeZone == schedule.timeZone
+        && data.categoryId == schedule.categoryId && data.commitmentClass == schedule.commitmentClass
+        && data.state == 'OPEN' && data.revision is int && data.revision == 0
+        && data.createdAt == request.time && data.updatedAt == request.time;
+    }
+
     match /users/{uid} {
       allow get: if isOwner(uid);
       allow list: if false;
@@ -514,6 +569,19 @@ service cloud.firestore {
           )
         );
         allow delete: if false;
+      }
+
+      match /schedules/{scheduleId} {
+        allow create: if isOwner(uid) && validId(scheduleId)
+          && validFirstMonthlyBill(uid, scheduleId, request.resource.data);
+        allow update, delete: if false;
+      }
+
+      match /occurrences/{occurrenceId} {
+        allow create: if isOwner(uid) && validId(occurrenceId)
+          && validId(request.resource.data.scheduleId)
+          && validFirstBillOccurrence(uid, occurrenceId, request.resource.data);
+        allow update, delete: if false;
       }
 
       match /budgets/{budgetId} {

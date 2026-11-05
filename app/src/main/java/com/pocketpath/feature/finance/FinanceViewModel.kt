@@ -53,6 +53,8 @@ class FinanceViewModel @Inject constructor(
     private var pendingBudget: Budget? = null
     private var pendingBudgetOperationId: String? = null
 
+    private var pendingMonthlyBill: Schedule? = null
+
     private var activityJob: Job? = null
     private var activityRequest = 0
 
@@ -79,6 +81,7 @@ class FinanceViewModel @Inject constructor(
                         pendingExpense = null
                         pendingBudget = null
                         pendingBudgetOperationId = null
+                        pendingMonthlyBill = null
                         _state.value = FinanceUiState(loading = false)
                         return@collectLatest
                     }
@@ -93,12 +96,24 @@ class FinanceViewModel @Inject constructor(
                         pendingBudgetOperationId = null
                     }
 
+                    if (previous == null) pendingMonthlyBill = null
+
                     _state.value = FinanceUiState(
                         userId = uid,
                         accountForm = previous?.accountForm?.copy(busy = false)
                             ?: CashAccountForm(),
                         expenseForm = previous?.expenseForm?.copy(busy = false)
                             ?: ExpenseForm(),
+                        monthlyBills = previous?.monthlyBills?.let { bills ->
+                            bills.copy(
+                                loading = true,
+                                cached = true,
+                                form = bills.form?.copy(
+                                    busy = false,
+                                    retryRequired = pendingMonthlyBill != null,
+                                ),
+                            )
+                        } ?: MonthlyBillsUiState(),
                     )
 
                     try {
@@ -157,6 +172,28 @@ class FinanceViewModel @Inject constructor(
                                     throw cancelled
                                 } catch (_: Exception) {
                                     // Another attempt occurs when server snapshots return or the user retries.
+                                }
+                            }
+
+                            launch {
+                                current.observeMonthlyBills().collect { observation ->
+                                    if (epoch != generation || _state.value.userId != uid) return@collect
+                                    _state.update { state ->
+                                        val bills = state.monthlyBills
+                                        state.copy(monthlyBills = when (observation) {
+                                            Observation.Loading -> bills.copy(loading = true, error = null)
+                                            is Observation.Data -> bills.copy(
+                                                occurrences = observation.value,
+                                                loading = false,
+                                                cached = observation.metadata.origin == DataOrigin.CACHE,
+                                                error = null,
+                                            )
+                                            is Observation.Failed -> bills.copy(
+                                                loading = false,
+                                                error = observation.failure.message,
+                                            )
+                                        })
+                                    }
                                 }
                             }
 
@@ -611,6 +648,37 @@ class FinanceViewModel @Inject constructor(
 
             FinanceEvent.SubmitBudget -> submitBudget()
 
+            FinanceEvent.OpenMonthlyBill -> _state.update { state ->
+                val bills = state.monthlyBills
+                if (bills.form == null && state.selectableCategories.isEmpty()) state
+                else state.copy(monthlyBills = bills.copy(
+                    showForm = true,
+                    form = bills.form ?: MonthlyBillForm(
+                        categoryId = state.selectableCategories.firstOrNull()?.id,
+                        dueDate = today(),
+                    ),
+                ))
+            }
+            FinanceEvent.CloseMonthlyBill -> _state.update { state ->
+                val bills = state.monthlyBills
+                if (bills.form?.busy == true) state
+                else state.copy(monthlyBills = bills.copy(
+                    showForm = false,
+                    form = bills.form?.takeIf { it.retryRequired },
+                ))
+            }
+            is FinanceEvent.EditMonthlyBill -> editMonthlyBill { form ->
+                if (form.busy || form.retryRequired) form
+                else form.copy(
+                    title = event.title ?: form.title,
+                    categoryId = event.categoryId ?: form.categoryId,
+                    amount = event.amount ?: form.amount,
+                    dueDate = event.dueDate ?: form.dueDate,
+                    error = null,
+                )
+            }
+            FinanceEvent.SaveMonthlyBill -> saveMonthlyBill()
+
             FinanceEvent.ReloadActivity -> loadActivity(reset = true)
 
             FinanceEvent.LoadMoreActivity -> {
@@ -618,6 +686,81 @@ class FinanceViewModel @Inject constructor(
                     _state.value.nextActivityCursor != null
                 ) {
                     loadActivity(reset = false)
+                }
+            }
+        }
+    }
+
+    private fun editMonthlyBill(update: (MonthlyBillForm) -> MonthlyBillForm) {
+        _state.update { state ->
+            val bills = state.monthlyBills
+            val form = bills.form ?: return@update state
+            state.copy(monthlyBills = bills.copy(form = update(form)))
+        }
+    }
+
+    private fun saveMonthlyBill() {
+        val state = _state.value
+        val form = state.monthlyBills.form ?: return
+        val uid = state.userId ?: return
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        if (form.busy || !state.monthlyBills.showForm) return
+
+        val schedule = pendingMonthlyBill ?: run {
+            val title = form.title.trim()
+            if (title.isEmpty() || title.length > 80) {
+                editMonthlyBill { it.copy(error = "Enter a bill name of up to 80 characters.") }
+                return
+            }
+            val category = state.selectableCategories.firstOrNull { it.id == form.categoryId }
+            if (category == null) {
+                editMonthlyBill { it.copy(error = "Select an active category.") }
+                return
+            }
+            val amount = runCatching { EntryAmount(Money.parse(form.amount.trim(), FiatCurrency.LKR)) }.getOrNull()
+            if (amount == null) {
+                editMonthlyBill { it.copy(error = "Enter a positive LKR amount with up to two decimal places.") }
+                return
+            }
+            val rawDate = form.dueDate.trim()
+            val date = runCatching { LocalDate.parse(rawDate) }.getOrNull()
+            if (date == null || date.year !in 0..9999 || date.toString() != rawDate) {
+                editMonthlyBill { it.copy(error = "Enter a valid first due date as YYYY-MM-DD.") }
+                return
+            }
+            Schedule(
+                id = UUID.randomUUID().toString(),
+                kind = ScheduleKind.COMMITMENT,
+                title = title,
+                recurrence = Recurrence(Frequency.MONTHLY, date),
+                timeZone = zone,
+                expectedAmount = amount,
+                amountMode = AmountMode.FIXED,
+                activeFrom = date,
+                categoryId = category.id,
+                commitmentClass = CommitmentClass.COMMITTED,
+            )
+        }
+        pendingMonthlyBill = schedule
+        editMonthlyBill { it.copy(busy = true, error = null) }
+        val epoch = generation
+        scope.launch {
+            val result = repo.saveMonthlyBill(schedule)
+            if (epoch != generation || _state.value.userId != uid) return@launch
+            when (result) {
+                is CommandResult.Accepted -> {
+                    pendingMonthlyBill = null
+                    _state.update { it.copy(monthlyBills = it.monthlyBills.copy(form = null, showForm = false)) }
+                }
+                is CommandResult.Rejected -> {
+                    val uncertain = result.failure.code in setOf(FailureCode.NETWORK, FailureCode.REJECTED)
+                    if (!uncertain) pendingMonthlyBill = null
+                    editMonthlyBill { it.copy(
+                        busy = false,
+                        retryRequired = uncertain,
+                        error = result.failure.message,
+                    ) }
                 }
             }
         }
