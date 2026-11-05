@@ -14,6 +14,7 @@ import com.pocketpath.data.firebase.FoundationCodec
 import com.pocketpath.data.firebase.UserCollection
 import com.pocketpath.data.firebase.UserFirestoreScope
 import com.pocketpath.domain.calculation.AccountBalance
+import com.pocketpath.domain.calculation.OccurrenceCalculator
 import com.pocketpath.domain.calculation.accountBalance
 import com.pocketpath.domain.model.*
 import com.pocketpath.domain.money.*
@@ -32,6 +33,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
 import java.security.MessageDigest
 import java.time.Instant
+import java.time.LocalDate
+import java.time.YearMonth
+import java.time.temporal.ChronoUnit
 import java.util.concurrent.CopyOnWriteArraySet
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -284,14 +288,14 @@ class FirebaseFoundationRepository internal constructor(
         )
     }
 
-    fun observeMonthlyBills(): Flow<Observation<List<Occurrence>>> = observeQuery(
+    fun observeMonthlyBills(): Flow<Observation<List<MonthlyBill>>> = observeQuery(
         query = { owned.collection(UserCollection.OCCURRENCES).whereEqualTo("kind", ScheduleKind.COMMITMENT.name).limit(5001) },
         completeHistory = false,
         coverageKey = "monthly-bills-v1",
     ) { snapshot ->
         snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
-            .map { FoundationCodec.firstMonthlyBill(it.id, requireNotNull(it.data)) }
-            .sortedWith(compareBy(Occurrence::effectiveDueDate, Occurrence::id))
+            .map { FoundationCodec.monthlyBill(it.id, requireNotNull(it.data)) }
+            .sortedWith(compareBy({ it.occurrence.effectiveDueDate }, { it.occurrence.id }))
     }
 
     /** Online configuration write. Replaying the same pair never creates a second bill. */
@@ -307,7 +311,9 @@ class FirebaseFoundationRepository internal constructor(
             val existingOccurrence = transaction.get(occurrenceRef)
             if (existingSchedule.exists() || existingOccurrence.exists()) {
                 if (existingSchedule.data?.filterKeys { it !in auditFields } != scheduleData.filterKeys { it !in auditFields } ||
-                    existingOccurrence.data?.filterKeys { it !in auditFields } != occurrenceData.filterKeys { it !in auditFields }
+                    existingOccurrence.data?.filterKeys {
+                        it in occurrenceData && it !in auditFields && it != "revision"
+                    } != occurrenceData.filterKeys { it !in auditFields && it != "revision" }
                 ) throw conflict()
                 true
             } else {
@@ -317,6 +323,99 @@ class FirebaseFoundationRepository internal constructor(
             }
         }.await()
         CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
+    suspend fun extendMonthlyBills(
+        bills: List<MonthlyBill>,
+        today: LocalDate,
+    ): CommandResult<Unit> = command(null) {
+        val occurrences = bills.map(MonthlyBill::occurrence)
+        val existingIds = occurrences.map(Occurrence::id).toSet()
+        val missing = mutableListOf<Occurrence>()
+        for (group in occurrences.groupBy(Occurrence::scheduleId).values) {
+            val anchor = group.minBy(Occurrence::nominalDate)
+            val firstMonth = YearMonth.from(anchor.nominalDate)
+            val lastMonth = maxOf(firstMonth, YearMonth.from(today)).plusMonths(1)
+            val months = ChronoUnit.MONTHS.between(firstMonth, lastMonth)
+            require(months <= 5_000) { "Bill history exceeds the supported window." }
+            for (offset in 1L..months) {
+                val date = OccurrenceCalculator.monthlyDate(anchor.nominalDate, firstMonth.plusMonths(offset))
+                if (date.year > 9999) break
+                if (StableIds.occurrence(anchor.scheduleId, date) !in existingIds) {
+                    require(occurrences.size + missing.size < 5_000) { "Too many bill occurrences." }
+                    missing += anchor.copy(nominalDate = date, effectiveDueDate = date)
+                }
+            }
+        }
+
+        val collection = owned.collection(UserCollection.OCCURRENCES)
+        // The create rule can read the schedule before and after the write.
+        for (chunk in missing.chunked(10)) {
+            firestore.runTransaction { transaction ->
+                requireSession()
+                val absent = chunk.filter { !transaction.get(collection.document(it.id)).exists() }
+                for (bill in absent) {
+                    transaction.set(collection.document(bill.id), FoundationCodec.monthlyBillOccurrenceData(bill))
+                }
+            }.await()
+        }
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED)
+    }
+
+    suspend fun payMonthlyBill(payment: RecordExpenseCommand): CommandResult<Unit> = command(payment.operationId) {
+        val occurrenceId = requireNotNull(payment.occurrenceId).also(FoundationCodec::checkId)
+        require(payment.amount.money.currency == FiatCurrency.LKR)
+        require(payment.historicalRate == null && payment.rateSnapshotId == null)
+        require(payment.commitmentClass == CommitmentClass.COMMITTED)
+        val amount = payment.amount.money.minor
+        val expense = FinancialTransaction(
+            operationId = payment.operationId,
+            kind = TransactionKind.EXPENSE,
+            status = TransactionStatus.POSTED,
+            financialTime = payment.financialTime,
+            clientCreatedAt = payment.clientCreatedAt,
+            movements = listOf(AccountMovement(payment.accountId, NativeAmount.Fiat(Money.lkr(-amount)))),
+            components = listOf(ReportComponent(
+                ComponentNature.SPENDING,
+                KnownLkrAmount.Known(payment.amount.money),
+                categoryId = payment.categoryId,
+                commitmentClass = CommitmentClass.COMMITTED,
+            )),
+            occurrenceId = occurrenceId,
+            note = payment.note,
+            merchantLabel = payment.merchantLabel,
+        )
+        val payload = FoundationCodec.eventData(expense)
+        val expenseRef = transactions.document(expense.id)
+        val billRef = owned.collection(UserCollection.OCCURRENCES).document(occurrenceId)
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val existing = transaction.get(expenseRef)
+            if (existing.exists()) {
+                if (!FoundationCodec.sameEvent(requireNotNull(existing.data), payload)) throw conflict()
+                return@runTransaction true
+            }
+
+            val bill = FoundationCodec.monthlyBill(occurrenceId, requireNotNull(transaction.get(billRef).data))
+            require(bill.occurrence.categoryId == payment.categoryId)
+            if (amount > bill.remainingMinor) {
+                throw FoundationProblem(FailureCode.VALIDATION, "Payment exceeds the remaining bill amount.")
+            }
+            transaction.set(expenseRef, payload)
+            transaction.update(billRef, billExpenseUpdate(bill, expense.id, bill.paidMinor + amount))
+            false
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
+    private fun billExpenseUpdate(bill: MonthlyBill, expenseId: String, paidMinor: Long): Map<String, Any> {
+        require(paidMinor in 0..bill.occurrence.expectedAmount.money.minor)
+        return mapOf(
+            "paidAmountMinor" to paidMinor,
+            "lastBillExpenseId" to expenseId,
+            "updatedAt" to FieldValue.serverTimestamp(),
+            "revision" to Math.addExact(bill.occurrence.metadata.revision, 1L),
+        )
     }
 
     suspend fun voidExpense(
@@ -375,6 +474,12 @@ class FirebaseFoundationRepository internal constructor(
 
                 val updateFields = FoundationCodec.expenseVoidData(existingEvent, voidReason, voidedAt)
 
+                existingEvent.occurrenceId?.let { id ->
+                    val billRef = owned.collection(UserCollection.OCCURRENCES).document(id)
+                    val bill = FoundationCodec.monthlyBill(id, requireNotNull(transaction.get(billRef).data))
+                    val amount = (existingEvent.components.single().lkrAmount as KnownLkrAmount.Known).amount.minor
+                    transaction.update(billRef, billExpenseUpdate(bill, existingEvent.id, bill.paidMinor - amount))
+                }
                 transaction.update(reference, updateFields)
 
                 val updatedEvent = FinancialTransaction(

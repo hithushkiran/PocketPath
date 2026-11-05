@@ -45,6 +45,9 @@ object OccurrenceCalculator {
             .toList()
     }
 
+    fun monthlyDate(anchor: LocalDate, month: YearMonth): LocalDate =
+        month.atDay(minOf(anchor.dayOfMonth, month.lengthOfMonth()))
+
     private fun nominalDates(schedule: Schedule, upperBound: LocalDate): Sequence<LocalDate> = sequence {
         val recurrence = schedule.recurrence
         when (recurrence.frequency) {
@@ -60,7 +63,7 @@ object OccurrenceCalculator {
                 var month = YearMonth.from(recurrence.anchorDate)
                 while (!month.atDay(1).isAfter(upperBound)) {
                     // Keep the original anchor on the schedule; only this occurrence's date clamps.
-                    yield(month.atDay(minOf(recurrence.anchorDate.dayOfMonth, month.lengthOfMonth())))
+                    yield(monthlyDate(recurrence.anchorDate, month))
                     month = month.plusMonths(1)
                 }
             }

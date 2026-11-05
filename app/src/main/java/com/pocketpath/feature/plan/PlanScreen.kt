@@ -63,14 +63,20 @@ fun PlanScreen(
         item {
             MonthlyBillsHeader(state.monthlyBills, state.selectableCategories.isNotEmpty(), onEvent)
         }
-        items(state.monthlyBills.occurrences.size) { index ->
+        items(
+            count = state.monthlyBills.occurrences.size,
+            key = { state.monthlyBills.occurrences[it].occurrence.id },
+        ) { index ->
             val bill = state.monthlyBills.occurrences[index]
-            Card(Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(bill.titleSnapshot, style = MaterialTheme.typography.titleMedium)
-                    Text("First due ${bill.effectiveDueDate} · ${lkrText(bill.expectedAmount.money.minor)}")
-                }
-            }
+            val date = LocalDate.now(bill.occurrence.timeZone)
+            MonthlyBillCard(
+                bill = bill,
+                today = date,
+                canPay = state.selectableAccounts.isNotEmpty() && !state.monthlyBills.cached &&
+                    !state.monthlyBills.loading && state.monthlyBills.error == null &&
+                    state.monthlyBills.payment == null,
+                onPay = { onEvent(FinanceEvent.OpenBillPayment(bill.occurrence.id)) },
+            )
         }
 
         val hasBudgets = state.overallMonthlyBudgetProgress != null ||
@@ -148,6 +154,12 @@ fun PlanScreen(
                 SpendingBreakdownCard(breakdown)
             }
         }
+    }
+
+    state.monthlyBills.payment?.takeIf { state.monthlyBills.showPayment }?.let { payment ->
+        val remaining = state.monthlyBills.occurrences
+            .firstOrNull { it.occurrence.id == payment.occurrenceId }?.remainingMinor
+        BillPaymentDialog(payment, remaining, state.selectableAccounts, onEvent)
     }
 
     val billForm = state.monthlyBills.form
