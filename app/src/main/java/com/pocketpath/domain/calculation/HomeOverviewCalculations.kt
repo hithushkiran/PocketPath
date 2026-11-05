@@ -18,6 +18,7 @@ data class HomeLedgerSummary(
     val reservedByGoal: Map<String, Long>,
     val billPaymentsByOccurrence: Map<String, Long>,
     val receivedBySourceMinor: Map<String, Long>,
+    val realizedCrypto: AnalyticalTotal? = null,
 )
 
 fun summarizeHomeLedger(ledger: CompleteLedger, date: LocalDate, zone: ZoneId): HomeLedgerSummary {
@@ -51,9 +52,13 @@ fun summarizeHomeLedger(ledger: CompleteLedger, date: LocalDate, zone: ZoneId): 
         billPayments[occurrenceId] = Math.addExact(billPayments[occurrenceId] ?: 0L, amount)
     }
     val reports = periodReportTotals(ledger, period)
+    val hasCryptoSale = ledger.events.any {
+        it.kind == TransactionKind.CRYPTO_SELL && it.status == TransactionStatus.POSTED && period.contains(it)
+    }
     return HomeLedgerSummary(
         date, reports.earningsLkrMinor, reports.netSpendingLkrMinor, reservedByAccount.toMap(),
         reservedByGoal.toMap(), billPayments.toMap(), receivedBySource.toMap(),
+        reports.realizedCrypto.takeIf { hasCryptoSale },
     )
 }
 

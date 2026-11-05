@@ -8,6 +8,7 @@ import kotlinx.serialization.Serializable
 @Serializable data object Goals
 @Serializable data object Add
 @Serializable data object Accounts
+@Serializable data object CryptoWallets
 @Serializable data object RecordIncome
 @Serializable data object IncomeSources
 @Serializable data object ExpectedPayments

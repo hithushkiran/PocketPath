@@ -47,6 +47,7 @@ import androidx.navigation.compose.rememberNavController
 import com.pocketpath.R
 import com.pocketpath.feature.accounts.AccountsScreen
 import com.pocketpath.feature.activity.ActivityScreen
+import com.pocketpath.feature.crypto.CryptoScreen
 import com.pocketpath.feature.goals.GoalsEvent
 import com.pocketpath.feature.goals.GoalsScreen
 import com.pocketpath.feature.goals.GoalsUiState
@@ -112,6 +113,7 @@ fun PocketPathApp(
     val title = when {
         destination.matches(Add::class) -> R.string.nav_add
         destination.matches(Accounts::class) -> R.string.nav_accounts
+        destination.matches(CryptoWallets::class) -> R.string.nav_crypto
         destination.matches(RecordIncome::class) -> R.string.nav_record_income
         destination.matches(IncomeSources::class) -> R.string.nav_income_sources
         destination.matches(ExpectedPayments::class) -> R.string.nav_expected_payments
@@ -144,6 +146,13 @@ fun PocketPathApp(
                                     onClick = {
                                         menuExpanded = false
                                         navController.navigate(Accounts) { launchSingleTop = true }
+                                    },
+                                )
+                                DropdownMenuItem(
+                                    text = { Text(stringResource(R.string.nav_crypto)) },
+                                    onClick = {
+                                        menuExpanded = false
+                                        navController.navigate(CryptoWallets) { launchSingleTop = true }
                                     },
                                 )
                                 DropdownMenuItem(
@@ -250,6 +259,9 @@ fun PocketPathApp(
                     onManageIncomeSources = { navController.navigate(IncomeSources) { launchSingleTop = true } },
                     onExpectedPayments = { navController.navigate(ExpectedPayments) { launchSingleTop = true } },
                 )
+            }
+            composable<CryptoWallets> {
+                CryptoScreen(state = financeState, onEvent = onFinanceEvent)
             }
             composable<RecordIncome> {
                 ManualIncomeScreen(state = incomeState, onEvent = onIncomeEvent)

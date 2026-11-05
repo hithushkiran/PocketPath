@@ -91,6 +91,13 @@ service cloud.firestore {
         && data.updatedAt == request.time;
     }
 
+    function validManualCryptoAsset(code, scale) {
+      return scale is int && (
+        (code in ['BTC', 'ETH'] && scale == 8)
+        || (code == 'USDT' && scale == 6)
+      );
+    }
+
     function validAccount(data) {
       return fields(
           data,
@@ -102,11 +109,11 @@ service cloud.firestore {
           ['institutionLabel']
         )
         && nonBlank(data.name)
-        && data.type in ['CASH', 'BANK', 'FIAT_WALLET']
-        && data.currencyCode == 'LKR'
-        && data.assetClass == 'FIAT'
-        && data.scale is int
-        && data.scale == 2
+        && ((data.type in ['CASH', 'BANK', 'FIAT_WALLET']
+          && data.currencyCode == 'LKR' && data.assetClass == 'FIAT'
+          && data.scale is int && data.scale == 2)
+          || (data.type == 'CRYPTO_WALLET' && data.assetClass == 'CRYPTO'
+            && data.includeInEverydayPool == false && validManualCryptoAsset(data.currencyCode, data.scale)))
         && data.includeInEverydayPool is bool
         && validId(data.openingTransactionId)
         && validDate(data.openedOn)
@@ -219,6 +226,18 @@ service cloud.firestore {
         && movement.amountMinor <= 100000000000;
     }
 
+    function validCryptoOpeningMovement(movement) {
+      return fields(movement, ['accountId', 'currencyCode', 'assetClass', 'scale', 'quantityAtomic'], [])
+        && validId(movement.accountId)
+        && movement.assetClass == 'CRYPTO'
+        && validManualCryptoAsset(movement.currencyCode, movement.scale)
+        && movement.quantityAtomic == '0';
+    }
+
+    function isCryptoTrade(kind) {
+      return kind in ['CRYPTO_BUY', 'CRYPTO_SELL'];
+    }
+
     function validEvent(id, data) {
       return fields(
           data,
@@ -254,9 +273,10 @@ service cloud.firestore {
         && (data.kind == 'GOAL_RESERVE'
           ? data.movements == [] && data.components == [] && data.categoryIds == []
           : data.movements is list && data.movements.size() == 1
-            && validMovement(data.movements[0])
             && data.accountIds == [data.movements[0].accountId]
-            && data.goalIds == [] && data.reservationEffects == [])
+            && data.goalIds == [] && data.reservationEffects == []
+            && (validMovement(data.movements[0]) || (data.kind == 'OPENING'
+              && validCryptoOpeningMovement(data.movements[0]))))
         && data.valuations == []
         && (
           !('note' in data)
@@ -299,9 +319,9 @@ service cloud.firestore {
         && !exists(account)
         && afterAccount.openingTransactionId == id
         && afterAccount.openedOn == data.occurredLocalDate
-        && afterAccount.currencyCode == 'LKR'
-        && afterAccount.assetClass == 'FIAT'
-        && afterAccount.scale == 2
+        && afterAccount.currencyCode == data.movements[0].currencyCode
+        && afterAccount.assetClass == data.movements[0].assetClass
+        && afterAccount.scale == data.movements[0].get('scale', 2)
         && afterAccount.createdAt == request.time;
     }
 
@@ -641,6 +661,146 @@ service cloud.firestore {
         && validReserveAccountUpdate(resource.data, request.resource.data, id);
     }
 
+    function positionPath(uid, walletId) {
+      return /databases/$(database)/documents/users/$(uid)/cryptoPositions/$(walletId);
+    }
+
+    // Trades have a fixed envelope and exactly two movements. Validate that
+    // shape directly so the paired position write shares a smaller rules budget.
+    function validCryptoEvent(id, data) {
+      return fields(data, [
+          'operationId', 'kind', 'status', 'occurredAt', 'occurredLocalDate',
+          'recordedTimeZone', 'clientCreatedAt', 'createdAt', 'schemaVersion', 'revision',
+          'accountIds', 'categoryIds', 'goalIds', 'incomeSourceIds', 'movements',
+          'components', 'reservationEffects', 'valuations', 'cryptoTrade'
+        ], ['note'])
+        && validId(id)
+        && data.schemaVersion is int && data.revision is int
+        && [data.operationId, data.status, data.createdAt, data.schemaVersion, data.revision]
+          == [id, 'POSTED', request.time, 1, 0]
+        && [data.goalIds, data.incomeSourceIds, data.reservationEffects, data.valuations] == [[], [], [], []]
+        && data.occurredAt is timestamp && data.clientCreatedAt is timestamp
+        && validDate(data.occurredLocalDate) && nonBlank(data.recordedTimeZone)
+        && (!('note' in data) || (data.note is string && data.note.size() <= 1000));
+    }
+
+    function validTradeFee(uid, data, fee) {
+      let component = data.components[0];
+      let id = component.categoryId;
+      return validId(id) && data.categoryIds == [id] && component.amountLkrMinor is int
+        && component == {
+          'nature': 'SPENDING', 'amountLkrMinor': fee,
+          'categoryId': id, 'commitmentClass': 'DISCRETIONARY'
+        }
+        && get(categoryPath(uid, id)).data.get('archivedAt', null) == null;
+    }
+
+    function validTradeReports(uid, data, trade, sell) {
+      let fee = trade.feeLkrMinor;
+      let feeCount = fee > 0 ? 1 : 0;
+      return data.components is list && data.components.size() == feeCount + (sell ? 1 : 0)
+        && (feeCount == 0 ? data.categoryIds == [] : validTradeFee(uid, data, fee))
+        && (!sell || (data.components[feeCount].amountLkrMinor is int && data.components[feeCount] == {
+          'nature': 'REALIZED_CRYPTO', 'amountLkrMinor': trade.realizedPnlLkrMinor
+        }));
+    }
+
+    function validTradeMovements(uid, data, trade, sell) {
+      let walletId = trade.assetAccountId;
+      let quoteId = trade.quoteAccountId;
+      let wallet = get(accountPath(uid, walletId)).data;
+      let quote = get(accountPath(uid, quoteId)).data;
+      let netCash = (sell ? trade.grossQuoteMinor : -trade.grossQuoteMinor) - trade.feeLkrMinor;
+      let atoms = trade.quantityAtomic;
+      return validId(walletId) && validId(quoteId) && walletId != quoteId
+        && data.accountIds == (walletId < quoteId ? [walletId, quoteId] : [quoteId, walletId])
+        && wallet.type == 'CRYPTO_WALLET' && wallet.assetClass == 'CRYPTO'
+        && validManualCryptoAsset(wallet.currencyCode, wallet.scale)
+        && wallet.get('archivedAt', null) == null
+        && [quote.currencyCode, quote.assetClass, quote.scale] == ['LKR', 'FIAT', 2]
+        && quote.get('archivedAt', null) == null
+        && (sell ? netCash > 0 : netCash >= -100000000000)
+        && data.movements == [
+          {
+            'accountId': walletId, 'assetClass': 'CRYPTO', 'currencyCode': wallet.currencyCode,
+            'scale': wallet.scale, 'quantityAtomic': sell ? '-' + atoms : atoms
+          },
+          {'accountId': quoteId, 'assetClass': 'FIAT', 'currencyCode': 'LKR', 'amountMinor': netCash}
+        ]
+        && data.movements[0].scale is int && data.movements[1].amountMinor is int;
+    }
+
+    function validCryptoTrade(uid, id, data) {
+      let trade = data.cryptoTrade;
+      let sell = data.kind == 'CRYPTO_SELL';
+      let after = getAfter(positionPath(uid, trade.assetAccountId)).data;
+      let keys = ['assetAccountId', 'quoteAccountId', 'quantityAtomic', 'grossQuoteMinor', 'feeLkrMinor', 'costMethod'];
+      return (sell ? trade.keys().hasAll(['allocatedCostLkrMinor', 'realizedPnlLkrMinor'])
+          && fields(trade, keys, ['allocatedCostLkrMinor', 'realizedPnlLkrMinor'])
+        : fields(trade, keys, []))
+        && trade.costMethod == 'MOVING_AVERAGE_V1'
+        && trade.quantityAtomic is string && trade.quantityAtomic.matches('[1-9][0-9]{0,11}')
+        && trade.grossQuoteMinor is int && trade.grossQuoteMinor > 0 && trade.grossQuoteMinor <= 100000000000
+        && trade.feeLkrMinor is int && trade.feeLkrMinor >= 0
+        && after.lastTransactionId == id && after.updatedAt == request.time
+        && validTradeMovements(uid, data, trade, sell)
+        && validTradeReports(uid, data, trade, sell);
+    }
+
+    // Compare two wide products in limbs, without floating point or overflowing int64.
+    function upperCostDigits(minor) {
+      let digits = string(minor);
+      return digits.size() <= 6 ? 0 : int(digits[0:digits.size() - 6]);
+    }
+
+    function validWeightedAllocation(cost, quantity, sold, allocated) {
+      let high = upperCostDigits(cost) * sold - upperCostDigits(allocated) * quantity;
+      let low = (cost % 1000000) * sold - (allocated % 1000000) * quantity;
+      return high >= -1000000000000 && high <= 1000000000000
+        && withinAllocationRounding(2 * (high * 1000000 + low), quantity);
+    }
+
+    function withinAllocationRounding(difference, quantity) {
+      return difference >= -quantity && difference < quantity;
+    }
+
+    function validCryptoSaleCost(trade, oldCost, oldQuantity, sold) {
+      return trade.allocatedCostLkrMinor is int && trade.allocatedCostLkrMinor >= 0
+        && trade.allocatedCostLkrMinor <= oldCost
+        && trade.realizedPnlLkrMinor is int
+        && trade.realizedPnlLkrMinor == trade.grossQuoteMinor - trade.feeLkrMinor - trade.allocatedCostLkrMinor
+        && (sold == oldQuantity ? trade.allocatedCostLkrMinor == oldCost
+          : validWeightedAllocation(oldCost, oldQuantity, sold, trade.allocatedCostLkrMinor));
+    }
+
+    function validCryptoPositionWrite(uid, walletId, before, after) {
+      let path = eventPath(uid, after.lastTransactionId);
+      let event = getAfter(path).data;
+      let trade = event.cryptoTrade;
+      let movement = event.movements[0];
+      let oldQuantity = before == null ? 0 : int(before.quantityAtomic);
+      let oldCost = before == null ? 0 : before.costLkrMinor;
+      let sell = event.kind == 'CRYPTO_SELL';
+      let quantity = int(trade.quantityAtomic);
+      let nextQuantity = oldQuantity + (sell ? -quantity : quantity);
+      return fields(after, ['currencyCode', 'scale', 'quantityAtomic', 'costLkrMinor', 'lastTransactionId',
+          'version', 'costMethod', 'lastTradeAt', 'updatedAt'], [])
+        && validId(after.lastTransactionId) && !exists(path)
+        && isCryptoTrade(event.kind) && event.createdAt == request.time && trade.assetAccountId == walletId
+        && after.scale is int && after.version is int
+        && [after.currencyCode, after.scale, after.costMethod, after.lastTradeAt, after.updatedAt]
+          == [movement.currencyCode, movement.scale, 'MOVING_AVERAGE_V1', event.occurredAt, request.time]
+        && (before == null || ([after.currencyCode, after.scale] == [before.currencyCode, before.scale]
+          && event.occurredAt >= before.lastTradeAt))
+        && after.version == (before == null ? 1 : before.version + 1)
+        && nextQuantity >= 0 && nextQuantity <= 999999999999 && after.quantityAtomic == string(nextQuantity)
+        && after.costLkrMinor is int && after.costLkrMinor >= 0 && after.costLkrMinor <= 100000000000
+        && (sell
+          ? validCryptoSaleCost(trade, oldCost, oldQuantity, quantity)
+            && after.costLkrMinor == oldCost - trade.allocatedCostLkrMinor
+          : after.costLkrMinor == oldCost + trade.grossQuoteMinor + trade.feeLkrMinor);
+    }
+
     match /users/{uid} {
       allow get: if isOwner(uid);
       allow list: if false;
@@ -726,8 +886,20 @@ service cloud.firestore {
         allow delete: if false;
       }
 
+      match /cryptoPositions/{walletId} {
+        allow create: if isOwner(uid) && validCryptoPositionWrite(uid, walletId, null, request.resource.data);
+        allow update: if isOwner(uid) && validCryptoPositionWrite(uid, walletId, resource.data, request.resource.data);
+        allow delete: if false;
+      }
+
       match /transactions/{transactionId} {
         allow create: if isOwner(uid)
+          && isCryptoTrade(request.resource.data.kind)
+          && validCryptoEvent(transactionId, request.resource.data)
+          && validCryptoTrade(uid, transactionId, request.resource.data);
+
+        allow create: if isOwner(uid)
+          && !isCryptoTrade(request.resource.data.kind)
           && validEvent(transactionId, request.resource.data)
           && (
             (

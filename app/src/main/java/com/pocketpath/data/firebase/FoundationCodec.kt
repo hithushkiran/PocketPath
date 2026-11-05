@@ -3,6 +3,8 @@ package com.pocketpath.data.firebase
 import com.google.firebase.Timestamp
 import com.google.firebase.firestore.FieldValue
 import com.pocketpath.domain.model.*
+import com.pocketpath.domain.calculation.manualCryptoAssets
+import com.pocketpath.domain.calculation.requireManualCryptoQuantity
 import com.pocketpath.domain.money.*
 import java.time.Instant
 import java.time.LocalDate
@@ -284,8 +286,7 @@ internal object FoundationCodec {
     fun accountData(account: Account): Map<String, Any> {
         checkId(account.id)
         checkId(account.openingTransactionId)
-        require(account.asset == FiatCurrency.LKR)
-        require(account.type != AccountType.CRYPTO_WALLET)
+        require(account.asset == FiatCurrency.LKR || account.asset in manualCryptoAssets)
         require(account.metadata == RecordMetadata()) {
             "New accounts cannot supply server metadata"
         }
@@ -294,9 +295,9 @@ internal object FoundationCodec {
         return buildMap {
             put("name", account.name)
             put("type", account.type.name)
-            put("currencyCode", "LKR")
-            put("assetClass", "FIAT")
-            put("scale", 2L)
+            put("currencyCode", account.asset.code)
+            put("assetClass", if (account.asset is CryptoAsset) "CRYPTO" else "FIAT")
+            put("scale", account.asset.scale.toLong())
             put("includeInEverydayPool", account.includeInEverydayPool)
             put("openingTransactionId", account.openingTransactionId)
             put("openedOn", account.openedOn.toString())
@@ -313,15 +314,18 @@ internal object FoundationCodec {
             accountRequired,
             setOf("institutionLabel", "archivedAt", "lastGoalReserveId"),
         )
-        require(data.text("currencyCode") == "LKR")
-        require(data.text("assetClass") == "FIAT")
-        require(data.integer("scale") == 2L)
+        val asset = if (data.text("assetClass") == "CRYPTO") {
+            cryptoAsset(data)
+        } else {
+            require(data.text("currencyCode") == "LKR" && data.text("assetClass") == "FIAT" && data.integer("scale") == 2L)
+            FiatCurrency.LKR
+        }
 
         return Account(
             id = id,
             name = data.text("name"),
             type = AccountType.valueOf(data.text("type")),
-            asset = FiatCurrency.LKR,
+            asset = asset,
             includeInEverydayPool = data.boolean("includeInEverydayPool"),
             openingTransactionId = data.text("openingTransactionId").also(::checkId),
             openedOn = LocalDate.parse(data.text("openedOn")),
@@ -377,13 +381,63 @@ internal object FoundationCodec {
     private val incomeComponentKeys = setOf("nature", "amountLkrMinor", "incomeSourceId")
     private val convertedUsdKeys = setOf("originalCurrency", "originalAmountMinor", "valuationRate", "rateSource")
 
+    private fun cryptoAsset(data: FirestoreFields): CryptoAsset = manualCryptoAssets.single {
+        it.code == data.text("currencyCode") && it.scale.toLong() == data.integer("scale")
+    }
+
+    private fun cryptoQuantity(asset: CryptoAsset, atomic: String): CryptoQuantity {
+        require(atomic.matches(Regex("0|-?[1-9][0-9]{0,11}")))
+        return CryptoQuantity(asset, atomic.toBigInteger())
+    }
+
+    fun cryptoPosition(id: String, data: FirestoreFields): CryptoPosition {
+        checkId(id)
+        data.checkKeys(setOf("currencyCode", "scale", "quantityAtomic", "costLkrMinor",
+            "lastTransactionId", "version", "costMethod", "lastTradeAt", "updatedAt"))
+        require(data.text("costMethod") == CostMethod.MOVING_AVERAGE_V1.name)
+        val position = CryptoPosition(
+            id, cryptoQuantity(cryptoAsset(data), data.text("quantityAtomic")),
+            KnownLkrAmount.Known(Money.lkr(data.integer("costLkrMinor"))),
+            data.text("lastTransactionId").also(::checkId), data.integer("version"),
+        )
+        require(position.version > 0L)
+        data.instant("lastTradeAt")
+        data.instant("updatedAt")
+        return position
+    }
+
+    fun cryptoPositionData(position: CryptoPosition, occurredAt: Instant): Map<String, Any> {
+        requireManualCryptoQuantity(position.quantity)
+        return mapOf(
+            "currencyCode" to position.quantity.asset.code,
+            "scale" to position.quantity.asset.scale.toLong(),
+            "quantityAtomic" to position.quantity.atomic.toString(),
+            "costLkrMinor" to (position.cost as KnownLkrAmount.Known).amount.minor,
+            "lastTransactionId" to position.lastTransactionId,
+            "version" to position.version,
+            "costMethod" to position.costMethod.name,
+            "lastTradeAt" to timestamp(occurredAt),
+            "updatedAt" to FieldValue.serverTimestamp(),
+        )
+    }
+
+    private val supportedEventKinds = setOf(
+        TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE,
+        TransactionKind.CRYPTO_BUY, TransactionKind.CRYPTO_SELL,
+    )
+
     fun eventData(event: FinancialTransaction): Map<String, Any> {
         checkId(event.id)
-        require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE))
+        require(event.kind in supportedEventKinds)
         require(event.status == TransactionStatus.POSTED && event.revision == 0L)
         require(event.voidMetadata == null)
         val isReserve = event.kind == TransactionKind.GOAL_RESERVE
-        require(event.movements.size == if (isReserve) 0 else 1)
+        val trade = event.cryptoTrade
+        require(event.movements.size == when {
+            isReserve -> 0
+            trade != null -> 2
+            else -> 1
+        })
         require(event.reservationEffects.size == if (isReserve) 1 else 0)
         require(event.valuations.isEmpty())
         if (isReserve) {
@@ -397,21 +451,26 @@ internal object FoundationCodec {
             require(event.kind == TransactionKind.EXPENSE)
         }
         require(event.originalTransactionId == null && event.goalPlanId == null)
-        require(event.cryptoTrade == null)
+        require(trade == null || event.merchantLabel == null && event.replacesTransactionId == null)
         require(event.merchantLabel == null || event.merchantLabel.length <= 1000)
         event.replacesTransactionId?.let { checkId(it) }
 
         val movementData = event.movements.map { movement ->
             checkId(movement.accountId)
-            val amount = movement.amount as? NativeAmount.Fiat
-                ?: error("Only fiat movements are supported by this adapter")
-            require(amount.money.currency == FiatCurrency.LKR)
-            mapOf(
-                "accountId" to movement.accountId,
-                "currencyCode" to "LKR",
-                "assetClass" to "FIAT",
-                "amountMinor" to amount.money.minor,
-            )
+            when (val amount = movement.amount) {
+                is NativeAmount.Fiat -> {
+                    require(amount.money.currency == FiatCurrency.LKR)
+                    mapOf("accountId" to movement.accountId, "currencyCode" to "LKR",
+                        "assetClass" to "FIAT", "amountMinor" to amount.money.minor)
+                }
+                is NativeAmount.Crypto -> {
+                    require(trade != null || event.kind == TransactionKind.OPENING && amount.quantity.atomic.signum() == 0)
+                    requireManualCryptoQuantity(amount.quantity)
+                    mapOf("accountId" to movement.accountId, "currencyCode" to amount.asset.code,
+                        "assetClass" to "CRYPTO", "scale" to amount.asset.scale.toLong(),
+                        "quantityAtomic" to amount.quantity.atomic.toString())
+                }
+            }
         }
 
         val componentData = when (event.kind) {
@@ -443,6 +502,11 @@ internal object FoundationCodec {
                 })
             }
             else -> event.components.map { component ->
+                if (component.nature == ComponentNature.REALIZED_CRYPTO) {
+                    require(event.kind == TransactionKind.CRYPTO_SELL)
+                    return@map mapOf("nature" to component.nature.name,
+                        "amountLkrMinor" to (component.lkrAmount as KnownLkrAmount.Known).amount.minor)
+                }
                 require(component.nature == ComponentNature.SPENDING)
                 require(component.originalAmount == null && component.valuationRate == null)
                 require(component.rateSnapshotId == null && component.incomeSourceId == null)
@@ -478,6 +542,28 @@ internal object FoundationCodec {
                 )
             })
             put("valuations", emptyList<Any>())
+            trade?.let {
+                val gross = (it.grossQuoteAmount as NativeAmount.Fiat).money
+                require(gross.currency == FiatCurrency.LKR && it.proceedsOrAcquisitionLkr == gross)
+                require(it.fees.size <= 1)
+                val fee = it.fees.singleOrNull()
+                require(fee == null || (fee.accountId == it.quoteAccountId && fee.amount == NativeAmount.Fiat(fee.lkrAmount)))
+                requireManualCryptoQuantity(it.quantity)
+                put("cryptoTrade", buildMap<String, Any> {
+                    put("assetAccountId", it.assetAccountId)
+                    put("quoteAccountId", it.quoteAccountId)
+                    put("quantityAtomic", it.quantity.atomic.toString())
+                    put("grossQuoteMinor", gross.minor)
+                    put("feeLkrMinor", fee?.lkrAmount?.minor ?: 0L)
+                    put("costMethod", it.costMethod.name)
+                    it.allocatedCost?.let { cost ->
+                        put("allocatedCostLkrMinor", (cost as KnownLkrAmount.Known).amount.minor)
+                    }
+                    it.realizedPnl?.let { pnl ->
+                        put("realizedPnlLkrMinor", (pnl as KnownLkrAmount.Known).amount.minor)
+                    }
+                })
+            }
             event.occurrenceId?.let { put("occurrenceId", it) }
             event.expectedPaymentId?.let { put("expectedPaymentId", it) }
             event.note?.let { put("note", it) }
@@ -501,7 +587,7 @@ internal object FoundationCodec {
         pending: Boolean = false,
     ): FinancialTransaction {
         checkId(id)
-        data.checkKeys(eventRequired, setOf("note", "merchantLabel", "occurrenceId", "expectedPaymentId", "voidMetadata", "updatedAt", "replacesTransactionId"))
+        data.checkKeys(eventRequired, setOf("note", "merchantLabel", "occurrenceId", "expectedPaymentId", "voidMetadata", "updatedAt", "replacesTransactionId", "cryptoTrade"))
         require(data.text("operationId") == id)
         require(data.integer("schemaVersion") == 1L)
         val revision = data.integer("revision")
@@ -528,7 +614,7 @@ internal object FoundationCodec {
         val replacesTransactionId = data.optionalText("replacesTransactionId")?.also(::checkId)
 
         val kind = TransactionKind.valueOf(data.text("kind"))
-        require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE)) {
+        require(kind in supportedEventKinds) {
             "Unsupported transaction kind: $kind"
         }
         val effects = data.maps("reservationEffects").map { effect ->
@@ -544,15 +630,37 @@ internal object FoundationCodec {
         require(data.list("valuations").isEmpty())
 
         val movements = data.maps("movements").map { movement ->
-            movement.checkKeys(
-                setOf("accountId", "currencyCode", "assetClass", "amountMinor"),
-            )
-            require(movement.text("currencyCode") == "LKR")
-            require(movement.text("assetClass") == "FIAT")
+            val amount = if (movement.text("assetClass") == "CRYPTO") {
+                movement.checkKeys(setOf("accountId", "currencyCode", "assetClass", "scale", "quantityAtomic"))
+                val quantity = cryptoQuantity(cryptoAsset(movement), movement.text("quantityAtomic"))
+                require(kind == TransactionKind.CRYPTO_BUY || kind == TransactionKind.CRYPTO_SELL ||
+                    kind == TransactionKind.OPENING && quantity.atomic.signum() == 0)
+                NativeAmount.Crypto(quantity)
+            } else {
+                movement.checkKeys(setOf("accountId", "currencyCode", "assetClass", "amountMinor"))
+                require(movement.text("currencyCode") == "LKR" && movement.text("assetClass") == "FIAT")
+                NativeAmount.Fiat(Money.lkr(movement.integer("amountMinor")))
+            }
+            AccountMovement(movement.text("accountId").also(::checkId), amount)
+        }
 
-            AccountMovement(
-                accountId = movement.text("accountId").also(::checkId),
-                amount = NativeAmount.Fiat(Money.lkr(movement.integer("amountMinor"))),
+        val trade = data.optionalMap("cryptoTrade")?.let { fields ->
+            val required = setOf("assetAccountId", "quoteAccountId", "quantityAtomic", "grossQuoteMinor", "feeLkrMinor", "costMethod")
+            val sell = kind == TransactionKind.CRYPTO_SELL
+            require(sell || kind == TransactionKind.CRYPTO_BUY)
+            fields.checkKeys(if (sell) required + setOf("allocatedCostLkrMinor", "realizedPnlLkrMinor") else required)
+            require(fields.text("costMethod") == CostMethod.MOVING_AVERAGE_V1.name)
+            val wallet = fields.text("assetAccountId").also(::checkId)
+            val quote = fields.text("quoteAccountId").also(::checkId)
+            val asset = (movements.single { it.accountId == wallet }.amount as NativeAmount.Crypto).quantity.asset
+            val gross = EntryAmount(Money.lkr(fields.integer("grossQuoteMinor"))).money
+            val fee = Money.lkr(fields.integer("feeLkrMinor"))
+            require(fee.minor >= 0L && (!sell || fee.minor < gross.minor))
+            CryptoTrade(
+                wallet, quote, cryptoQuantity(asset, fields.text("quantityAtomic")), NativeAmount.Fiat(gross),
+                if (fee.minor == 0L) emptyList() else listOf(TradeFee(quote, NativeAmount.Fiat(fee), fee)), gross,
+                if (sell) KnownLkrAmount.Known(Money.lkr(fields.integer("allocatedCostLkrMinor"))) else null,
+                if (sell) KnownLkrAmount.Known(Money.lkr(fields.integer("realizedPnlLkrMinor"))) else null,
             )
         }
 
@@ -577,6 +685,9 @@ internal object FoundationCodec {
                     incomeSourceId = component.text("incomeSourceId").also(::checkId),
                     originalAmount = original, valuationRate = rate,
                 )
+            } else if (kind == TransactionKind.CRYPTO_SELL && component.text("nature") == "REALIZED_CRYPTO") {
+                component.checkKeys(setOf("nature", "amountLkrMinor"))
+                ReportComponent(ComponentNature.REALIZED_CRYPTO, amountLkr)
             } else {
                 component.checkKeys(setOf("nature", "amountLkrMinor", "categoryId", "commitmentClass"))
                 require(component.text("nature") == "SPENDING")
@@ -604,6 +715,7 @@ internal object FoundationCodec {
             note = data.optionalText("note"),
             merchantLabel = data.optionalText("merchantLabel"),
             replacesTransactionId = replacesTransactionId,
+            cryptoTrade = trade,
             voidMetadata = voidMetadata,
             revision = revision,
             createdAt = if (pending && data["createdAt"] == null) {
@@ -613,7 +725,11 @@ internal object FoundationCodec {
             },
         )
 
-        require(result.movements.size == if (isReserve) 0 else 1)
+        require(result.movements.size == when {
+            isReserve -> 0
+            trade != null -> 2
+            else -> 1
+        })
         if (isReserve) require(result.merchantLabel == null && result.replacesTransactionId == null)
         if (kind == TransactionKind.INCOME) {
             val movement = result.movements.single().amount as NativeAmount.Fiat

@@ -668,3 +668,123 @@ test('USD metadata cannot bypass source, ownership, precision, credit or receipt
   assert.equal((await getDoc(eventRef(receipt.operationId))).exists(), false);
   assert.equal((await getDoc(paymentRef())).data().receivedAmountMinor, 0);
 });
+
+const walletId = 'wallet-ETH';
+const walletOpeningId = 'opening-wallet-ETH';
+const positionRef = (client = db) => doc(client, root, 'cryptoPositions', walletId);
+const ethMovement = (quantityAtomic) => ({
+  accountId: walletId, currencyCode: 'ETH', assetClass: 'CRYPTO', scale: 8, quantityAtomic,
+});
+
+function createEthWallet(quantity = '0') {
+  const batch = writeBatch(db);
+  batch.set(doc(db, root, 'accounts', walletId), {
+    ...account(walletId, walletOpeningId), type: 'CRYPTO_WALLET', currencyCode: 'ETH', assetClass: 'CRYPTO',
+    scale: 8, includeInEverydayPool: false,
+  });
+  batch.set(eventRef(walletOpeningId), {
+    ...event(walletOpeningId, 'OPENING', 0, walletId), movements: [ethMovement(quantity)],
+  });
+  return batch.commit();
+}
+
+function cryptoEvent(id, kind, quantity, gross, fee, allocated) {
+  const sell = kind === 'CRYPTO_SELL';
+  const realized = sell ? gross - fee - allocated : null;
+  return {
+    ...event(id, kind), accountIds: ['bank', walletId], categoryIds: fee > 0 ? ['food'] : [],
+    movements: [
+      ethMovement(String(sell ? -quantity : quantity)),
+      { accountId: 'bank', assetClass: 'FIAT', currencyCode: 'LKR', amountMinor: (sell ? gross : -gross) - fee },
+    ],
+    components: [
+      ...(fee > 0 ? [{
+        nature: 'SPENDING', amountLkrMinor: fee, categoryId: 'food', commitmentClass: 'DISCRETIONARY',
+      }] : []),
+      ...(sell ? [{ nature: 'REALIZED_CRYPTO', amountLkrMinor: realized }] : []),
+    ],
+    cryptoTrade: {
+      assetAccountId: walletId, quoteAccountId: 'bank', quantityAtomic: String(quantity),
+      grossQuoteMinor: gross, feeLkrMinor: fee, costMethod: 'MOVING_AVERAGE_V1',
+      ...(sell ? { allocatedCostLkrMinor: allocated, realizedPnlLkrMinor: realized } : {}),
+    },
+  };
+}
+
+function cryptoPosition(id, quantity, cost, version) {
+  return {
+    currencyCode: 'ETH', scale: 8, quantityAtomic: String(quantity), costLkrMinor: cost,
+    lastTransactionId: id, version, costMethod: 'MOVING_AVERAGE_V1', lastTradeAt: audit, updatedAt: serverTimestamp(),
+  };
+}
+
+function cryptoBatch(trade, position, client = db) {
+  const batch = writeBatch(client);
+  batch.set(eventRef(trade.operationId, client), trade);
+  batch.set(positionRef(client), position);
+  return batch.commit();
+}
+
+test('crypto buy, partial sale and full disposal preserve exact holdings and cash', async () => {
+  await assertSucceeds(createEthWallet());
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('buy', 'CRYPTO_BUY', 200_000_000, 10_000_000, 100_000),
+    cryptoPosition('buy', 200_000_000, 10_100_000, 1),
+  ));
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('sell', 'CRYPTO_SELL', 50_000_000, 3_000_000, 50_000, 2_525_000),
+    cryptoPosition('sell', 150_000_000, 7_575_000, 2),
+  ));
+  const sold = (await assertSucceeds(getDoc(eventRef('sell')))).data();
+  assert.equal(sold.cryptoTrade.realizedPnlLkrMinor, 425_000);
+  assert.equal(sold.movements[1].amountMinor, 2_950_000);
+  assert.equal((await assertSucceeds(getDoc(positionRef()))).data().quantityAtomic, '150000000');
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('close', 'CRYPTO_SELL', 150_000_000, 7_000_000, 0, 7_575_000),
+    cryptoPosition('close', 0, 0, 3),
+  ));
+});
+
+test('crypto rules reject an unpaired trade, a nonzero opening, forged cost and stale versions', async () => {
+  await assertFails(createEthWallet('1'));
+  await assertSucceeds(createEthWallet());
+  const buy = cryptoEvent('buy', 'CRYPTO_BUY', 200_000_000, 10_000_000, 100_000);
+  const opened = cryptoPosition('buy', 200_000_000, 10_100_000, 1);
+  await assertFails(setDoc(eventRef('buy'), buy));
+  await assertFails(setDoc(positionRef(), opened));
+  const other = environment.authenticatedContext('other').firestore();
+  await assertFails(cryptoBatch(buy, opened, other));
+  await assertSucceeds(cryptoBatch(buy, opened));
+  await assertFails(cryptoBatch(
+    cryptoEvent('forged', 'CRYPTO_SELL', 50_000_000, 3_000_000, 50_000, 2_524_999),
+    cryptoPosition('forged', 150_000_000, 7_575_001, 2),
+  ));
+  await assertFails(cryptoBatch(
+    cryptoEvent('oversell', 'CRYPTO_SELL', 200_000_001, 3_000_000, 0, 10_100_000),
+    cryptoPosition('oversell', -1, 0, 2),
+  ));
+  await assertFails(cryptoBatch(
+    cryptoEvent('stale', 'CRYPTO_SELL', 50_000_000, 3_000_000, 50_000, 2_525_000),
+    cryptoPosition('stale', 150_000_000, 7_575_000, 1),
+  ));
+  const unchanged = (await assertSucceeds(getDoc(positionRef()))).data();
+  assert.equal(unchanged.lastTransactionId, 'buy');
+  assert.equal(unchanged.costLkrMinor, 10_100_000);
+});
+
+test('crypto allocation rounds an exact half minor unit upward', async () => {
+  await assertSucceeds(createEthWallet());
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('buy', 'CRYPTO_BUY', 999_999_999_998, 100_000_000_000 - 1, 0),
+    cryptoPosition('buy', 999_999_999_998, 100_000_000_000 - 1, 1),
+  ));
+  const sold = 499_999_999_999;
+  await assertFails(cryptoBatch(
+    cryptoEvent('wrong', 'CRYPTO_SELL', sold, 30_000, 0, 49_999_999_999),
+    cryptoPosition('wrong', sold, 50_000_000_000, 2),
+  ));
+  await assertSucceeds(cryptoBatch(
+    cryptoEvent('rounded', 'CRYPTO_SELL', sold, 30_000, 0, 50_000_000_000),
+    cryptoPosition('rounded', sold, 49_999_999_999, 2),
+  ));
+});

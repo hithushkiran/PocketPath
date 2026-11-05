@@ -20,6 +20,7 @@
     <string name="nav_goals">Goals</string>
     <string name="nav_add">Add</string>
     <string name="nav_accounts">Accounts</string>
+    <string name="nav_crypto">Crypto</string>
     <string name="nav_record_income">Record income</string>
     <string name="nav_income_sources">Income sources</string>
     <string name="nav_expected_payments">Expected payments</string>

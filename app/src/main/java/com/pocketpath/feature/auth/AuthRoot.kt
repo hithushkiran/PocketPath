@@ -99,7 +99,7 @@ fun AuthRoot(
                         ?: visibleFinance.localError,
                     onSignOut = {
                         if (visibleFinance.hasUnresolvedLocalWork || visibleFinance.monthlyBills.hasUnresolvedSave ||
-                            visibleGoals.hasUnresolvedWrite ||
+                            visibleFinance.crypto.hasUnresolvedWrite || visibleGoals.hasUnresolvedWrite ||
                             visibleIncome.hasUnresolvedIncomeWork ||
                             visibleIncome.hasUnresolvedSourceWork ||
                             visibleExpectedPayments.hasUnresolvedCancellationRetry || visibleExpectedPayments.receiptRecovery.hasWork
@@ -173,6 +173,11 @@ fun AuthRoot(
                                     if (isNotEmpty()) append("\n\n")
                                     append("A bill or payment may already have reached the server. Signing out discards " +
                                         "its retry details. Check Plan and Activity after signing back in before trying again.")
+                                }
+                                if (visibleFinance.crypto.hasUnresolvedWrite) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append("A crypto save may already have reached the server. Signing out clears its " +
+                                        "retry details. Check Crypto and Activity after signing back in.")
                                 }
                                 if (visibleGoals.hasUnresolvedWrite) {
                                     if (isNotEmpty()) append("\n\n")

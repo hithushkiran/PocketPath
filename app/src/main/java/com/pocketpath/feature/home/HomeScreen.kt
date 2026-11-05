@@ -93,6 +93,10 @@ fun HomeScreen(
                 Text("Outstanding expected payments are shown separately in Accounts.")
             }
             AmountRow("Net spending", summary.netSpendingMinor)
+            summary.realizedCrypto?.let { realized ->
+                AmountRow("Realized crypto gain/loss", realized.knownLkrMinor)
+                if (!realized.isComplete) Text("Some sale costs are unavailable.")
+            }
         }
 
         state.accounts.forEach { account ->

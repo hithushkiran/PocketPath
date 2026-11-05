@@ -14,6 +14,9 @@ import com.pocketpath.data.firebase.FoundationCodec
 import com.pocketpath.data.firebase.UserCollection
 import com.pocketpath.data.firebase.UserFirestoreScope
 import com.pocketpath.domain.calculation.AccountBalance
+import com.pocketpath.domain.calculation.CRYPTO_FEE_CATEGORY_ID
+import com.pocketpath.domain.calculation.ManualCryptoTrade
+import com.pocketpath.domain.calculation.planManualCryptoTrade
 import com.pocketpath.domain.calculation.BalanceUnits
 import com.pocketpath.domain.calculation.OccurrenceCalculator
 import com.pocketpath.domain.calculation.accountBalance
@@ -32,6 +35,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.tasks.await
+import java.math.BigInteger
 import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDate
@@ -657,8 +661,9 @@ class FirebaseFoundationRepository internal constructor(
 
         require(account.openingTransactionId == command.operationId)
         require(account.openedOn == command.financialTime.occurredLocalDate)
-        require(account.asset == FiatCurrency.LKR)
         require(command.openingAmount.asset == account.asset)
+        if (account.asset is CryptoAsset) require(command.openingAmount.atomicUnits().signum() == 0)
+        else require(account.asset == FiatCurrency.LKR)
 
         val opening = FinancialTransaction(
             operationId = command.operationId,
@@ -738,6 +743,74 @@ class FirebaseFoundationRepository internal constructor(
             replayed = result.replayed,
         )
     }
+
+    fun observeCryptoPositions(): Flow<Observation<List<CryptoPosition>>> =
+        observeQuery(
+            query = { owned.collection(UserCollection.CRYPTO_POSITIONS).limit(5001) },
+            completeHistory = false,
+            coverageKey = "crypto-positions-v1",
+        ) { snapshot ->
+            snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
+                .map { FoundationCodec.cryptoPosition(it.id, requireNotNull(it.data)) }
+        }
+
+    suspend fun recordManualCryptoTrade(trade: ManualCryptoTrade): CommandResult<FinancialTransaction> =
+        command(trade.operationId) {
+            if (trade.fee.minor > 0L) {
+                // Trade rules read the category before the trade write. Save its stable ID first.
+                val feeCategory = Category(
+                    id = CRYPTO_FEE_CATEGORY_ID,
+                    name = "Crypto fees",
+                    defaultCommitmentClass = CommitmentClass.DISCRETIONARY,
+                    sortOrder = 3,
+                )
+                val saved = saveCategory(trade.operationId, feeCategory)
+                if (saved is CommandResult.Rejected) return@command saved
+            }
+
+            val eventRef = transactions.document(trade.operationId)
+            val positionRef = owned.collection(UserCollection.CRYPTO_POSITIONS).document(trade.walletId)
+            val result = firestore.runTransaction { transaction ->
+                requireSession()
+                val existing = transaction.get(eventRef)
+                if (existing.exists()) {
+                    val event = FoundationCodec.event(existing.id, requireNotNull(existing.data))
+                    if (!trade.matches(event)) throw conflict()
+                    return@runTransaction Applied(event, replayed = true)
+                }
+
+                val walletSnapshot = transaction.get(accounts.document(trade.walletId))
+                val quoteSnapshot = transaction.get(accounts.document(trade.quoteAccountId))
+                val positionSnapshot = transaction.get(positionRef)
+                val wallet = FoundationCodec.account(walletSnapshot.id, requireNotNull(walletSnapshot.data))
+                val quote = FoundationCodec.account(quoteSnapshot.id, requireNotNull(quoteSnapshot.data))
+                require(wallet.asset == trade.quantity.asset && wallet.metadata.archivedAt == null)
+                require(quote.asset == FiatCurrency.LKR && quote.metadata.archivedAt == null)
+                val current = if (positionSnapshot.exists()) {
+                    FoundationCodec.cryptoPosition(positionSnapshot.id, requireNotNull(positionSnapshot.data))
+                } else {
+                    CryptoPosition(wallet.id, CryptoQuantity(trade.quantity.asset, BigInteger.ZERO),
+                        KnownLkrAmount.Known(Money.lkr(0L)), wallet.openingTransactionId, 0L)
+                }
+                if (current.version != trade.expectedVersion) {
+                    throw FoundationProblem(FailureCode.CONFLICT, "Your crypto position changed. Review it and try again.")
+                }
+                positionSnapshot.getTimestamp("lastTradeAt")?.let { last ->
+                    val lastTrade = Instant.ofEpochSecond(last.seconds, last.nanoseconds.toLong())
+                    if (trade.time.occurredAt < lastTrade) {
+                        throw FoundationProblem(FailureCode.VALIDATION, "Use a date on or after the previous trade.")
+                    }
+                }
+                if (trade.kind == TransactionKind.CRYPTO_SELL && trade.quantity.atomic > current.quantity.atomic) {
+                    throw FoundationProblem(FailureCode.VALIDATION, "Cannot sell more than the recorded holding.")
+                }
+                val next = planManualCryptoTrade(trade, current)
+                transaction.set(eventRef, FoundationCodec.eventData(next.event))
+                transaction.set(positionRef, FoundationCodec.cryptoPositionData(next.position, trade.time.occurredAt))
+                Applied(next.event)
+            }.await()
+            CommandResult.Accepted(result.value, WriteState.CLOUD_CONFIRMED, result.replayed)
+        }
 
     private fun effectiveQuery(): Query =
         transactions
