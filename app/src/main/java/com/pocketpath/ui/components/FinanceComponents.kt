@@ -37,7 +37,7 @@ fun balanceText(balance: AccountBalance?): String =
         null -> "—"
     }
 
-private fun groupedAmount(amount: BigDecimal): String =
+internal fun groupedAmount(amount: BigDecimal): String =
     String.format(Locale.ROOT, "%,.${amount.scale()}f", amount)
 
 @Composable
