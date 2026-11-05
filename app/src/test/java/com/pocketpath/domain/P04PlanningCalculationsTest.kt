@@ -131,6 +131,64 @@ class P04PlanningCalculationsTest {
         }
     }
 
+    @Test fun homeWaitsForBothBillAndLedgerSnapshotsAndDoesNotDeductPartialPaymentsTwice() {
+        val rent = MonthlyBill(
+            Occurrence(
+                "rent", date.minusDays(1), date.minusDays(1), ScheduleKind.COMMITMENT, "Rent",
+                EntryAmount(Money.lkr(3_000_000L)), zone,
+                categoryId = "housing", commitmentClass = CommitmentClass.COMMITTED,
+            ),
+            paidMinor = 0L,
+        )
+        val nextMonth = MonthlyBill(
+            rent.occurrence.copy(nominalDate = date.plusMonths(1), effectiveDueDate = date.plusMonths(1)),
+            paidMinor = 0L,
+        )
+        val ledger = CompleteLedger(listOf(
+            reservation("bank-savings", 1_000_000L),
+            reservation("excluded-savings", 600_000L, accountId = "excluded"),
+        ))
+        val before = summarizeHomeLedger(ledger, date, zone)
+        val unpaid = listOf(rent, nextMonth)
+        val oldFunds = requireNotNull(recordedHomeFunds(before, 8_000_000L, setOf("bank"), unpaid))
+        assertEquals(date.withDayOfMonth(31), oldFunds.input.horizonEnd)
+        assertEquals(1_000_000L, oldFunds.input.reservedInEligibleAccountsMinor!!)
+        assertEquals(3_000_000L, oldFunds.input.outstandingCommitmentsMinor!!)
+        assertEquals(4_000_000L, oldFunds.availableAfterConfirmedReservationsMinor)
+
+        val payment = FinancialTransaction(
+            operationId = "rent-payment",
+            kind = TransactionKind.EXPENSE,
+            status = TransactionStatus.POSTED,
+            financialTime = FinancialTime(now, date, zone),
+            clientCreatedAt = now,
+            movements = listOf(AccountMovement("bank", NativeAmount.Fiat(Money.lkr(-1_000_000L)))),
+            components = listOf(ReportComponent(
+                ComponentNature.SPENDING, KnownLkrAmount.Known(Money.lkr(1_000_000L)),
+                categoryId = "housing", commitmentClass = CommitmentClass.COMMITTED,
+            )),
+            occurrenceId = rent.occurrence.id,
+        )
+        val after = summarizeHomeLedger(CompleteLedger(ledger.events + payment), date, zone)
+        val paid = listOf(rent.copy(paidMinor = 1_000_000L), nextMonth)
+        assertNull(recordedHomeFunds(before, 8_000_000L, setOf("bank"), paid))
+        assertNull(recordedHomeFunds(after, 7_000_000L, setOf("bank"), unpaid))
+        val newFunds = requireNotNull(recordedHomeFunds(after, 7_000_000L, setOf("bank"), paid))
+        assertEquals(2_000_000L, newFunds.input.outstandingCommitmentsMinor!!)
+        assertEquals(oldFunds.availableAfterConfirmedReservationsMinor, newFunds.availableAfterConfirmedReservationsMinor)
+        assertEquals(1_000_000L, after.netSpendingMinor)
+    }
+
+    @Test fun aPurchaseFromAnExcludedAccountLeavesEverydayFundsAlone() {
+        val input = FundsPlanningInput(date, 8_000_000L, 1_000_000L, 3_000_000L, 0L)
+        val amount = EntryAmount(Money.lkr(200_000L))
+        val outsidePool = previewPurchaseImpact(input, amount, payingAccountInPool = false)
+        assertEquals(200_000L, outsidePool.purchaseLkrMinor)
+        assertEquals(4_000_000L, outsidePool.after.flexibleFundsMinor)
+        assertEquals(0L, outsidePool.incrementalPlanningGapMinor)
+        assertEquals(3_800_000L, previewPurchaseImpact(input, amount).after.flexibleFundsMinor)
+    }
+
     @Test fun invalidReservationHistoryAndAggregateOverflowFailExplicitly() {
         assertThrows(IllegalArgumentException::class.java) {
             calculateGoalProgress(goal, CompleteLedger(listOf(reservation("bad-release", -1L))), now)

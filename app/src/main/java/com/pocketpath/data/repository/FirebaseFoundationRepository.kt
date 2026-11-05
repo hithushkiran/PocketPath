@@ -419,10 +419,11 @@ class FirebaseFoundationRepository internal constructor(
         CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
     }
 
+    /** Result says whether the supplied snapshot already covered every due date this month. */
     suspend fun extendMonthlyBills(
         bills: List<MonthlyBill>,
         today: LocalDate,
-    ): CommandResult<Unit> = command(null) {
+    ): CommandResult<Boolean> = command(null) {
         val occurrences = bills.map(MonthlyBill::occurrence)
         val existingIds = occurrences.map(Occurrence::id).toSet()
         val missing = mutableListOf<Occurrence>()
@@ -453,7 +454,11 @@ class FirebaseFoundationRepository internal constructor(
                 }
             }.await()
         }
-        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED)
+        val horizon = today.withDayOfMonth(today.lengthOfMonth())
+        CommandResult.Accepted(
+            missing.none { it.effectiveDueDate <= horizon },
+            WriteState.CLOUD_CONFIRMED,
+        )
     }
 
     suspend fun payMonthlyBill(payment: RecordExpenseCommand): CommandResult<Unit> = command(payment.operationId) {

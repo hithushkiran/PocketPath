@@ -74,11 +74,13 @@ data class PurchaseImpactPreview(
  * Existing reserved bill: release is the outstanding reservation covered by this
  * payment, capped at both the purchase and C. A linked bill flow supplies it;
  * do not infer a release from an expense category alone.
+ * A purchase paid from an excluded account does not reduce everyday liquidity.
  */
 fun previewPurchaseImpact(
     input: FundsPlanningInput,
     purchase: EntryAmount,
     commitmentReservationReleasedMinor: Long = 0L,
+    payingAccountInPool: Boolean = true,
 ): PurchaseImpactPreview {
     require(purchase.money.currency == FiatCurrency.LKR)
     val before = calculateFundsPlan(input) as? FundsPlanningResult.Ready
@@ -90,7 +92,9 @@ fun previewPurchaseImpact(
     }
 
     val afterInput = input.copy(
-        eligibleBalanceMinor = Math.subtractExact(requireNotNull(input.eligibleBalanceMinor), amount),
+        eligibleBalanceMinor = Math.subtractExact(
+            requireNotNull(input.eligibleBalanceMinor), if (payingAccountInPool) amount else 0L,
+        ),
         outstandingCommitmentsMinor = Math.subtractExact(outstanding, commitmentReservationReleasedMinor),
     )
     val after = calculateFundsPlan(afterInput) as FundsPlanningResult.Ready

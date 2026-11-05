@@ -1,6 +1,12 @@
 package com.pocketpath.feature.finance
 
 import com.pocketpath.domain.calculation.AccountBalance
+import com.pocketpath.domain.calculation.BalanceUnits
+import com.pocketpath.domain.calculation.FundsPlanningResult
+import com.pocketpath.domain.calculation.HomeLedgerSummary
+import com.pocketpath.domain.calculation.PurchaseImpactPreview
+import com.pocketpath.domain.calculation.previewPurchaseImpact
+import com.pocketpath.domain.calculation.recordedHomeFunds
 import com.pocketpath.domain.calculation.BudgetProgress
 import com.pocketpath.domain.calculation.CommitmentBreakdown
 import com.pocketpath.domain.model.Account
@@ -11,7 +17,10 @@ import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
 import com.pocketpath.domain.model.MonthlyBill
+import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.FiatCurrency
+import com.pocketpath.domain.money.Money
+import java.time.YearMonth
 import com.pocketpath.domain.repository.WriteState
 import com.pocketpath.domain.repository.ActivityCursor
 
@@ -92,6 +101,7 @@ data class BillPaymentForm(
 data class MonthlyBillsUiState(
     val occurrences: List<MonthlyBill> = emptyList(),
     val recurrenceError: String? = null,
+    val coverageMonth: YearMonth? = null,
     val payment: BillPaymentForm? = null,
     val showPayment: Boolean = false,
     val loading: Boolean = true,
@@ -104,6 +114,22 @@ data class MonthlyBillsUiState(
         get() = form?.let { it.busy || it.retryRequired } == true ||
             payment?.let { it.busy || it.retryRequired } == true
 }
+
+data class PurchasePreviewForm(
+    val accountId: String? = null,
+    val categoryId: String? = null,
+    val amount: String = "",
+) {
+    val enteredAmount: EntryAmount?
+        get() = runCatching { EntryAmount(Money.parse(amount.trim(), FiatCurrency.LKR)) }.getOrNull()
+}
+
+data class HomePurchaseResult(
+    val impact: PurchaseImpactPreview,
+    val accountInEverydayPool: Boolean,
+    val unreservedAccountBalanceAfterMinor: Long,
+    val reservedInAccountMinor: Long,
+)
 
 data class FinanceUiState(
     val userId: String? = null,
@@ -119,6 +145,8 @@ data class FinanceUiState(
     val balances: Map<String, AccountBalance> = emptyMap(),
     val poolBalanceMinor: Long? = null,
     val goalReservationsMinor: Map<String, Long>? = null,
+    val homeLedger: HomeLedgerSummary? = null,
+    val purchaseForm: PurchasePreviewForm? = null,
     val accountForm: CashAccountForm = CashAccountForm(),
     val expenseForm: ExpenseForm = ExpenseForm(),
     val categoryForm: CategoryForm = CategoryForm(),
@@ -179,6 +207,37 @@ data class FinanceUiState(
     val ready: Boolean
         get() = userId != null && !loading && error == null
 
+    val homeFunds: FundsPlanningResult.Ready?
+        get() {
+            val ledger = homeLedger ?: return null
+            val balance = poolBalanceMinor ?: return null
+            if (!ready || monthlyBills.loading || monthlyBills.error != null ||
+                monthlyBills.coverageMonth != YearMonth.from(ledger.date)
+            ) return null
+            val everydayIds = accounts.filter { it.includeInEverydayPool }.map(Account::id).toSet()
+            return runCatching { recordedHomeFunds(ledger, balance, everydayIds, monthlyBills.occurrences) }.getOrNull()
+        }
+
+    fun purchaseResult(plan: FundsPlanningResult.Ready?): HomePurchaseResult? {
+        val form = purchaseForm ?: return null
+        val input = plan?.input ?: return null
+        val amount = form.enteredAmount ?: return null
+        val account = selectableAccounts.firstOrNull { it.id == form.accountId } ?: return null
+        if (selectableCategories.none { it.id == form.categoryId }) return null
+        val balance = balances[account.id]?.units as? BalanceUnits.Fiat ?: return null
+        val reserved = homeLedger?.reservedByAccount?.get(account.id) ?: 0L
+        return runCatching {
+            HomePurchaseResult(
+                impact = previewPurchaseImpact(input, amount, payingAccountInPool = account.includeInEverydayPool),
+                accountInEverydayPool = account.includeInEverydayPool,
+                unreservedAccountBalanceAfterMinor = Math.subtractExact(
+                    Math.subtractExact(balance.minor, reserved), amount.money.minor,
+                ),
+                reservedInAccountMinor = reserved,
+            )
+        }.getOrNull()
+    }
+
     val selectableAccounts: List<Account>
         get() = accounts.filter {
             it.asset == FiatCurrency.LKR && it.metadata.archivedAt == null
@@ -235,6 +294,13 @@ sealed interface FinanceEvent {
         val dueDate: String? = null,
     ) : FinanceEvent
     data object SaveMonthlyBill : FinanceEvent
+    data object OpenPurchasePreview : FinanceEvent
+    data object ClosePurchasePreview : FinanceEvent
+    data class EditPurchasePreview(
+        val accountId: String? = null,
+        val categoryId: String? = null,
+        val amount: String? = null,
+    ) : FinanceEvent
     data class OpenBillPayment(val occurrenceId: String) : FinanceEvent
     data object CloseBillPayment : FinanceEvent
     data class EditBillPayment(
