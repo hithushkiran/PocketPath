@@ -14,6 +14,7 @@ import com.pocketpath.data.firebase.FoundationCodec
 import com.pocketpath.data.firebase.UserCollection
 import com.pocketpath.data.firebase.UserFirestoreScope
 import com.pocketpath.domain.calculation.AccountBalance
+import com.pocketpath.domain.calculation.BalanceUnits
 import com.pocketpath.domain.calculation.OccurrenceCalculator
 import com.pocketpath.domain.calculation.accountBalance
 import com.pocketpath.domain.model.*
@@ -321,6 +322,99 @@ class FirebaseFoundationRepository internal constructor(
                 transaction.set(occurrenceRef, occurrenceData)
                 false
             }
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
+    fun observeGoals(): Flow<Observation<List<Goal>>> = observeQuery(
+        query = { owned.collection(UserCollection.GOALS).limit(5001) },
+        completeHistory = false,
+        coverageKey = "goals-v1",
+    ) { snapshot ->
+        snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
+            .map { FoundationCodec.goal(it.id, requireNotNull(it.data)) }
+            .sortedWith(compareBy(Goal::deadline, Goal::id))
+    }
+
+    suspend fun saveGoal(goal: Goal): CommandResult<Unit> = command(goal.id) {
+        val ref = owned.collection(UserCollection.GOALS).document(goal.id)
+        val fields = FoundationCodec.goalData(goal)
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val existing = transaction.get(ref)
+            if (existing.exists()) {
+                val audit = setOf("createdAt", "updatedAt")
+                if (requireNotNull(existing.data).filterKeys { it !in audit } != fields.filterKeys { it !in audit }) {
+                    throw conflict()
+                }
+                true
+            } else {
+                transaction.set(ref, fields)
+                false
+            }
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
+    suspend fun reserveForGoal(event: FinancialTransaction): CommandResult<Unit> = command(event.id) {
+        require(event.kind == TransactionKind.GOAL_RESERVE)
+        val fields = FoundationCodec.eventData(event)
+        val effect = event.reservationEffects.single()
+        val eventRef = transactions.document(event.id)
+        val existing = eventRef.get(Source.SERVER).await()
+        if (existing.exists() && !existing.metadata.hasPendingWrites()) {
+            if (!FoundationCodec.sameEvent(requireNotNull(existing.data), fields)) throw conflict()
+            return@command CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed = true)
+        }
+
+        val accountRef = accounts.document(effect.backingAccountId)
+        val goalRef = owned.collection(UserCollection.GOALS).document(effect.goalId)
+        val accountSnapshot = accountRef.get(Source.SERVER).await()
+        if (accountSnapshot.metadata.hasPendingWrites()) throw incomplete()
+        val account = FoundationCodec.account(accountRef.id, requireNotNull(accountSnapshot.data))
+        require(account.metadata.archivedAt == null)
+        // Read the account revision before the ledger. A reservation made after
+        // this read changes the revision and forces a fresh backing check.
+        val snapshot = effectiveQuery().get(Source.SERVER).await()
+        requireCompleteSnapshot(snapshot)
+        val ledger = decodeLedger(snapshot)
+        if (ledger.events.none { it.id == account.openingTransactionId }) throw incomplete()
+        val balance = accountBalance(account, ledger).units as BalanceUnits.Fiat
+        val reserved = ledger.events.asSequence()
+            .flatMap { it.reservationEffects.asSequence() }
+            .filter { it.backingAccountId == account.id }
+            .fold(0L) { total, item -> Math.addExact(total, item.amountLkr.minor) }
+        val available = Math.subtractExact(balance.minor, reserved)
+        // Check replay again if the same event appeared between the two reads.
+        val recorded = snapshot.documents.firstOrNull { it.id == event.id }
+        if (recorded != null) {
+            if (!FoundationCodec.sameEvent(requireNotNull(recorded.data), fields)) throw conflict()
+            return@command CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed = true)
+        }
+        if (effect.amountLkr.minor > available) {
+            throw FoundationProblem(FailureCode.VALIDATION, "The account does not have enough unreserved funds.")
+        }
+
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val saved = transaction.get(eventRef)
+            if (saved.exists()) {
+                if (!FoundationCodec.sameEvent(requireNotNull(saved.data), fields)) throw conflict()
+                return@runTransaction true
+            }
+            val latest = transaction.get(accountRef)
+            val goal = transaction.get(goalRef)
+            if (!goal.exists()) throw FoundationProblem(FailureCode.NOT_FOUND, "Goal not found.")
+            if (latest.getLong("revision") != account.metadata.revision) {
+                throw FoundationProblem(FailureCode.CONFLICT, "The account's reservations changed. Review and try again.")
+            }
+            transaction.set(eventRef, fields)
+            transaction.update(accountRef, mapOf(
+                "lastGoalReserveId" to event.id,
+                "revision" to Math.addExact(account.metadata.revision, 1L),
+                "updatedAt" to FieldValue.serverTimestamp(),
+            ))
+            false
         }.await()
         CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
     }

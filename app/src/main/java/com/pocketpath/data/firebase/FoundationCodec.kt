@@ -311,7 +311,7 @@ internal object FoundationCodec {
         checkId(id)
         data.checkKeys(
             accountRequired,
-            setOf("institutionLabel", "archivedAt"),
+            setOf("institutionLabel", "archivedAt", "lastGoalReserveId"),
         )
         require(data.text("currencyCode") == "LKR")
         require(data.text("assetClass") == "FIAT")
@@ -335,13 +335,60 @@ internal object FoundationCodec {
         )
     }
 
+    fun goalData(goal: Goal): Map<String, Any> {
+        checkId(goal.id)
+        require(goal.state == GoalState.ACTIVE && goal.metadata == RecordMetadata())
+        require(goal.name.length <= 80)
+        val first = requireNotNull(goal.firstContributionDate)
+        require(goal.startDate.year in 0..9999 && goal.deadline.year in 0..9999)
+        return mapOf(
+            "name" to goal.name,
+            "targetLkrMinor" to goal.target.money.minor,
+            "startDate" to goal.startDate.toString(),
+            "deadline" to goal.deadline.toString(),
+            "firstContributionDate" to first.toString(),
+            "state" to goal.state.name,
+            "createdAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp(),
+            "revision" to 0L,
+        )
+    }
+
+    fun goal(id: String, data: FirestoreFields): Goal {
+        checkId(id)
+        data.checkKeys(setOf(
+            "name", "targetLkrMinor", "startDate", "deadline", "firstContributionDate",
+            "state", "createdAt", "updatedAt", "revision",
+        ))
+        require(data.text("state") == GoalState.ACTIVE.name && data.integer("revision") == 0L)
+        val name = data.text("name")
+        require(name.length <= 80)
+        return Goal(
+            id = id,
+            name = name,
+            target = EntryAmount(Money.lkr(data.integer("targetLkrMinor"))),
+            startDate = LocalDate.parse(data.text("startDate")),
+            deadline = LocalDate.parse(data.text("deadline")),
+            metadata = RecordMetadata(data.instant("createdAt"), data.instant("updatedAt")),
+            firstContributionDate = LocalDate.parse(data.text("firstContributionDate")),
+        )
+    }
+
     fun eventData(event: FinancialTransaction): Map<String, Any> {
         checkId(event.id)
-        require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME))
+        require(event.kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE))
         require(event.status == TransactionStatus.POSTED && event.revision == 0L)
         require(event.voidMetadata == null)
-        require(event.movements.size == 1)
-        require(event.reservationEffects.isEmpty() && event.valuations.isEmpty())
+        val isReserve = event.kind == TransactionKind.GOAL_RESERVE
+        require(event.movements.size == if (isReserve) 0 else 1)
+        require(event.reservationEffects.size == if (isReserve) 1 else 0)
+        require(event.valuations.isEmpty())
+        if (isReserve) {
+            require(event.merchantLabel == null && event.replacesTransactionId == null)
+            val effect = event.reservationEffects.single()
+            checkId(effect.goalId)
+            checkId(effect.backingAccountId)
+        }
         event.occurrenceId?.let {
             checkId(it)
             require(event.kind == TransactionKind.EXPENSE)
@@ -351,14 +398,22 @@ internal object FoundationCodec {
         require(event.merchantLabel == null || event.merchantLabel.length <= 1000)
         event.replacesTransactionId?.let { checkId(it) }
 
-        val movement = event.movements.single()
-        checkId(movement.accountId)
-        val amount = movement.amount as? NativeAmount.Fiat
-            ?: error("Only fiat movements are supported by this adapter")
-        require(amount.money.currency == FiatCurrency.LKR)
+        val movementData = event.movements.map { movement ->
+            checkId(movement.accountId)
+            val amount = movement.amount as? NativeAmount.Fiat
+                ?: error("Only fiat movements are supported by this adapter")
+            require(amount.money.currency == FiatCurrency.LKR)
+            mapOf(
+                "accountId" to movement.accountId,
+                "currencyCode" to "LKR",
+                "assetClass" to "FIAT",
+                "amountMinor" to amount.money.minor,
+            )
+        }
 
         val componentData = when (event.kind) {
             TransactionKind.INCOME -> {
+                val amount = event.movements.single().amount as NativeAmount.Fiat
                 require(event.components.size == 1 && amount.money.minor > 0)
                 require(event.merchantLabel == null)
                 val component = event.components.single()
@@ -397,19 +452,15 @@ internal object FoundationCodec {
             put("categoryIds", event.categoryIds)
             put("goalIds", event.goalIds)
             put("incomeSourceIds", event.incomeSourceIds)
-            put(
-                "movements",
-                listOf(
-                    mapOf(
-                        "accountId" to movement.accountId,
-                        "currencyCode" to "LKR",
-                        "assetClass" to "FIAT",
-                        "amountMinor" to amount.money.minor,
-                    ),
-                ),
-            )
+            put("movements", movementData)
             put("components", componentData)
-            put("reservationEffects", emptyList<Any>())
+            put("reservationEffects", event.reservationEffects.map { effect ->
+                mapOf(
+                    "goalId" to effect.goalId,
+                    "backingAccountId" to effect.backingAccountId,
+                    "amountLkrMinor" to effect.amountLkr.minor,
+                )
+            })
             put("valuations", emptyList<Any>())
             event.occurrenceId?.let { put("occurrenceId", it) }
             event.expectedPaymentId?.let { put("expectedPaymentId", it) }
@@ -461,10 +512,19 @@ internal object FoundationCodec {
         val replacesTransactionId = data.optionalText("replacesTransactionId")?.also(::checkId)
 
         val kind = TransactionKind.valueOf(data.text("kind"))
-        require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME)) {
+        require(kind in setOf(TransactionKind.OPENING, TransactionKind.EXPENSE, TransactionKind.INCOME, TransactionKind.GOAL_RESERVE)) {
             "Unsupported transaction kind: $kind"
         }
-        require(data.list("reservationEffects").isEmpty())
+        val effects = data.maps("reservationEffects").map { effect ->
+            effect.checkKeys(setOf("goalId", "backingAccountId", "amountLkrMinor"))
+            ReservationEffect(
+                effect.text("goalId").also(::checkId),
+                effect.text("backingAccountId").also(::checkId),
+                Money.lkr(effect.integer("amountLkrMinor")),
+            )
+        }
+        val isReserve = kind == TransactionKind.GOAL_RESERVE
+        require(effects.size == if (isReserve) 1 else 0)
         require(data.list("valuations").isEmpty())
 
         val movements = data.maps("movements").map { movement ->
@@ -505,6 +565,7 @@ internal object FoundationCodec {
             clientCreatedAt = data.instant("clientCreatedAt"),
             movements = movements,
             components = components,
+            reservationEffects = effects,
             occurrenceId = data.optionalText("occurrenceId")?.also(::checkId)?.also {
                 require(kind == TransactionKind.EXPENSE)
             },
@@ -521,7 +582,8 @@ internal object FoundationCodec {
             },
         )
 
-        require(result.movements.size == 1)
+        require(result.movements.size == if (isReserve) 0 else 1)
+        if (isReserve) require(result.merchantLabel == null && result.replacesTransactionId == null)
         if (kind == TransactionKind.INCOME) {
             val movement = result.movements.single().amount as NativeAmount.Fiat
             val component = result.components.single()
@@ -726,9 +788,10 @@ internal object FoundationCodec {
         )
     }
 
-    fun sameAccount(actual: FirestoreFields, expected: FirestoreFields): Boolean =
-        actual.filterKeys { it !in setOf("createdAt", "updatedAt") } ==
-            expected.filterKeys { it !in setOf("createdAt", "updatedAt") }
+    fun sameAccount(actual: FirestoreFields, expected: FirestoreFields): Boolean {
+        val mutableFields = setOf("createdAt", "updatedAt", "revision", "lastGoalReserveId")
+        return actual.filterKeys { it !in mutableFields } == expected.filterKeys { it !in mutableFields }
+    }
 
     fun sameEvent(actual: FirestoreFields, expected: FirestoreFields): Boolean =
         actual.filterKeys { it != "createdAt" } ==

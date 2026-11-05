@@ -543,3 +543,70 @@ test('later bills use the original monthly anchor and leave the unpaid first occ
   assert.equal((await getDocs(collection(db, root, 'occurrences'))).size, 3);
   assert.equal((await getDocs(collection(db, root, 'transactions'))).size, 1);
 });
+
+function goalDocument(overrides = {}) {
+  return {
+    name: 'Laptop', targetLkrMinor: 49_000_000,
+    startDate: '2026-11-01', deadline: '2027-10-31', firstContributionDate: '2026-11-05',
+    state: 'ACTIVE', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0,
+    ...overrides,
+  };
+}
+
+const goalRef = (client = db) => doc(client, root, 'goals', 'laptop');
+const backingRef = (client = db) => doc(client, root, 'accounts', 'bank');
+
+function goalReservation(id, overrides = {}) {
+  return {
+    ...event(id, 'GOAL_RESERVE'), movements: [], components: [],
+    accountIds: ['bank'], categoryIds: [], goalIds: ['laptop'],
+    reservationEffects: [{ goalId: 'laptop', backingAccountId: 'bank', amountLkrMinor: 2_000_000 }],
+    ...overrides,
+  };
+}
+
+function reserveAccountPatch(id, revision) {
+  return { lastGoalReserveId: id, revision, updatedAt: serverTimestamp() };
+}
+
+function writeGoalReservation(reservation, revision, client = db) {
+  const batch = writeBatch(client);
+  batch.set(eventRef(reservation.operationId, client), reservation);
+  batch.update(backingRef(client), reserveAccountPatch(reservation.operationId, revision));
+  return batch.commit();
+}
+
+test('goals allow owner creation with valid dates and reject mutable saved balances', async () => {
+  const other = environment.authenticatedContext('other-user').firestore();
+  await assertFails(setDoc(goalRef(other), goalDocument()));
+  await assertFails(setDoc(goalRef(), goalDocument({ firstContributionDate: '2027-11-01' })));
+  await assertFails(setDoc(goalRef(), goalDocument({ savedLkrMinor: 2_000_000 })));
+  await assertSucceeds(setDoc(goalRef(), goalDocument()));
+  await assertFails(getDoc(goalRef(other)));
+  await assertFails(updateDoc(goalRef(), { savedLkrMinor: 2_000_000 }));
+  await assertFails(deleteDoc(goalRef()));
+});
+
+test('goal contribution and backing revision must commit together under one owner', async () => {
+  const reservation = goalReservation('allocate-laptop');
+  await assertFails(writeGoalReservation(reservation, 1));
+  await assertSucceeds(setDoc(goalRef(), goalDocument()));
+  await assertFails(setDoc(eventRef(reservation.operationId), reservation));
+  await assertFails(updateDoc(backingRef(), reserveAccountPatch(reservation.operationId, 1)));
+  await assertFails(writeGoalReservation({ ...reservation, goalIds: ['other'] }, 1));
+  await assertFails(writeGoalReservation({ ...reservation, movements: event('wrong').movements }, 1));
+  await assertFails(writeGoalReservation(reservation, 1, environment.authenticatedContext('other-user').firestore()));
+
+  await assertSucceeds(writeGoalReservation(reservation, 1));
+  await assertFails(writeGoalReservation(reservation, 2));
+  await assertFails(writeGoalReservation(goalReservation('stale-allocation'), 1));
+  await assertFails(deleteDoc(eventRef(reservation.operationId)));
+  const recorded = (await getDoc(eventRef(reservation.operationId))).data();
+  assert.deepEqual(recorded.movements, []);
+  assert.deepEqual(recorded.components, []);
+  assert.deepEqual(recorded.reservationEffects, reservation.reservationEffects);
+  const backing = (await getDoc(backingRef())).data();
+  assert.equal(backing.revision, 1);
+  assert.equal(backing.openingTransactionId, 'opening-bank');
+  assert.equal(backing.lastGoalReserveId, reservation.operationId);
+});

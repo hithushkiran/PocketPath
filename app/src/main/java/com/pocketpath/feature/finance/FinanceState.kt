@@ -118,6 +118,7 @@ data class FinanceUiState(
     val monthlyCommitmentBreakdown: CommitmentBreakdown? = null,
     val balances: Map<String, AccountBalance> = emptyMap(),
     val poolBalanceMinor: Long? = null,
+    val goalReservationsMinor: Map<String, Long>? = null,
     val accountForm: CashAccountForm = CashAccountForm(),
     val expenseForm: ExpenseForm = ExpenseForm(),
     val categoryForm: CategoryForm = CategoryForm(),

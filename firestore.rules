@@ -233,7 +233,7 @@ service cloud.firestore {
         )
         && validId(id)
         && data.operationId == id
-        && data.kind in ['OPENING', 'EXPENSE', 'INCOME']
+        && data.kind in ['OPENING', 'EXPENSE', 'INCOME', 'GOAL_RESERVE']
         && (!('occurrenceId' in data) || (data.kind == 'EXPENSE' && validId(data.occurrenceId)))
         && (
           !('expectedPaymentId' in data)
@@ -249,14 +249,14 @@ service cloud.firestore {
         && data.schemaVersion == 1
         && data.revision is int
         && data.revision == 0
-        && data.movements is list
-        && data.movements.size() == 1
-        && validMovement(data.movements[0])
-        && data.accountIds == [data.movements[0].accountId]
         && data.components is list
         && data.categoryIds is list
-        && data.goalIds == []
-        && data.reservationEffects == []
+        && (data.kind == 'GOAL_RESERVE'
+          ? data.movements == [] && data.components == [] && data.categoryIds == []
+          : data.movements is list && data.movements.size() == 1
+            && validMovement(data.movements[0])
+            && data.accountIds == [data.movements[0].accountId]
+            && data.goalIds == [] && data.reservationEffects == [])
         && data.valuations == []
         && (
           !('note' in data)
@@ -569,6 +569,53 @@ service cloud.firestore {
       );
     }
 
+    function validNewGoal(data) {
+      return fields(data, [
+          'name', 'targetLkrMinor', 'startDate', 'deadline', 'firstContributionDate',
+          'state', 'createdAt', 'updatedAt', 'revision'
+        ], [])
+        && nonBlank(data.name) && data.name.size() <= 80
+        && data.targetLkrMinor is int
+        && data.targetLkrMinor > 0 && data.targetLkrMinor <= 100000000000
+        && validDate(data.startDate) && validDate(data.deadline) && validDate(data.firstContributionDate)
+        && data.firstContributionDate >= data.startDate && data.firstContributionDate <= data.deadline
+        && data.state == 'ACTIVE' && data.revision is int && data.revision == 0
+        && data.createdAt == request.time && data.updatedAt == request.time;
+    }
+
+    function validReserveAccountUpdate(before, after, eventId) {
+      return before.currencyCode == 'LKR' && before.assetClass == 'FIAT' && before.scale == 2
+        && before.get('archivedAt', null) == null
+        && after.diff(before).affectedKeys().hasOnly(['lastGoalReserveId', 'revision', 'updatedAt'])
+        && after.lastGoalReserveId == eventId
+        && after.revision is int && after.revision == before.revision + 1
+        && after.updatedAt == request.time;
+    }
+
+    function validGoalReserve(uid, id, data) {
+      let effect = data.reservationEffects[0];
+      let account = accountPath(uid, effect.backingAccountId);
+      let goal = /databases/$(database)/documents/users/$(uid)/goals/$(effect.goalId);
+      return data.reservationEffects is list && data.reservationEffects.size() == 1
+        && fields(effect, ['goalId', 'backingAccountId', 'amountLkrMinor'], [])
+        && validId(effect.goalId) && validId(effect.backingAccountId)
+        && effect.amountLkrMinor is int && effect.amountLkrMinor > 0
+        && effect.amountLkrMinor <= 100000000000
+        && data.accountIds == [effect.backingAccountId] && data.goalIds == [effect.goalId]
+        && data.incomeSourceIds == [] && !('merchantLabel' in data)
+        && get(goal).data.state == 'ACTIVE'
+        && validReserveAccountUpdate(get(account).data, getAfter(account).data, id);
+    }
+
+    function validAccountReserve(uid, accountId) {
+      let id = request.resource.data.lastGoalReserveId;
+      let path = eventPath(uid, id);
+      let event = getAfter(path).data;
+      return validId(id) && !exists(path) && event.kind == 'GOAL_RESERVE'
+        && event.reservationEffects[0].backingAccountId == accountId
+        && validReserveAccountUpdate(resource.data, request.resource.data, id);
+    }
+
     match /users/{uid} {
       allow get: if isOwner(uid);
       allow list: if false;
@@ -641,11 +688,17 @@ service cloud.firestore {
         allow update, delete: if false;
       }
 
+      match /goals/{goalId} {
+        allow create: if isOwner(uid) && validId(goalId) && validNewGoal(request.resource.data);
+        allow update, delete: if false;
+      }
+
       match /accounts/{accountId} {
         allow create: if isOwner(uid)
           && validNewAccount(uid, accountId, request.resource.data);
 
-        allow update, delete: if false;
+        allow update: if isOwner(uid) && validAccountReserve(uid, accountId);
+        allow delete: if false;
       }
 
       match /transactions/{transactionId} {
@@ -666,6 +719,10 @@ service cloud.firestore {
               request.resource.data.kind == 'INCOME'
               && validIncome(uid, request.resource.data)
               && validIncomeExpectedLink(uid, transactionId, request.resource.data)
+            )
+            || (
+              request.resource.data.kind == 'GOAL_RESERVE'
+              && validGoalReserve(uid, transactionId, request.resource.data)
             )
           );
 

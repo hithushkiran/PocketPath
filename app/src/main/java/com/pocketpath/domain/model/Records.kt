@@ -186,9 +186,11 @@ data class Goal(
     val id: String, val name: String, val target: EntryAmount,
     val startDate: LocalDate, val deadline: LocalDate, val state: GoalState = GoalState.ACTIVE,
     val completedAt: Instant? = null, val metadata: RecordMetadata = RecordMetadata(),
+    val firstContributionDate: LocalDate? = null,
 ) {
     init {
         require(id.isNotBlank() && name.isNotBlank() && target.money.currency == FiatCurrency.LKR)
+        require(firstContributionDate == null || firstContributionDate in startDate..deadline)
         require(deadline >= startDate)
         require((state == GoalState.COMPLETED) == (completedAt != null))
     }

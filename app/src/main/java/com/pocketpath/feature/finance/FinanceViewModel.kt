@@ -361,12 +361,21 @@ class FinanceViewModel @Inject constructor(
                                                 Math.addExact(total, units.minor)
                                             }
 
+                                        val goalReservations = mutableMapOf<String, Long>()
+                                        for (event in ledgerData.value.events) {
+                                            for (effect in event.reservationEffects) {
+                                                goalReservations[effect.goalId] = Math.addExact(
+                                                    goalReservations[effect.goalId] ?: 0L, effect.amountLkr.minor,
+                                                )
+                                            }
+                                        }
                                         _state.update {
                                             it.copy(
                                                 loading = false,
                                                 error = null,
                                                 balances = balances,
                                                 poolBalanceMinor = pool,
+                                                goalReservationsMinor = goalReservations,
                                                 cached = accountData.metadata.origin == DataOrigin.CACHE ||
                                                     ledgerData.metadata.origin == DataOrigin.CACHE,
                                                 lastConfirmedAt = ledgerData.metadata.observedAt?.toString(),
