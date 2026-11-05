@@ -426,6 +426,44 @@ service cloud.firestore {
         ]);
     }
 
+    // Budgets are immutable records in the existing collection. IDs are retained
+    // by the caller for retries; updates, archival and uniqueness are deferred.
+    function validNewBudget(uid, data) {
+      return fields(data, [
+          'scope', 'periodType', 'limitLkrMinor', 'effectiveFrom',
+          'rolloverEnabled', 'state', 'createdAt', 'updatedAt', 'revision'
+        ], ['effectiveTo', 'categoryId'])
+        && data.scope in ['OVERALL_DISCRETIONARY', 'CATEGORY_DISCRETIONARY']
+        && data.periodType in ['WEEKLY', 'MONTHLY']
+        && data.limitLkrMinor is int
+        && data.limitLkrMinor > 0 && data.limitLkrMinor <= 100000000000
+        && validDate(data.effectiveFrom)
+        && (!('effectiveTo' in data) || (validDate(data.effectiveTo) && data.effectiveTo >= data.effectiveFrom))
+        && data.rolloverEnabled == false
+        && data.state == 'ACTIVE'
+        && data.revision is int && data.revision == 0
+        && data.createdAt == request.time && data.updatedAt == request.time
+        && (data.scope == 'OVERALL_DISCRETIONARY'
+          ? !('categoryId' in data)
+          : (validId(data.categoryId) && exists(categoryPath(uid, data.categoryId))));
+    }
+
+    // One-way lifecycle transition only; all financial and creation fields stay
+    // byte-for-byte equal. Income/receipts and opening events remain immutable.
+    function validExpenseVoid() {
+      let before = resource.data;
+      let after = request.resource.data;
+      return before.kind == 'EXPENSE' && before.status == 'POSTED'
+        && before.revision == 0
+        && after.status == 'VOIDED'
+        && after.revision is int && after.revision == before.revision + 1
+        && after.updatedAt == request.time
+        && fields(after.voidMetadata, ['voidedAt', 'voidReason'], [])
+        && after.voidMetadata.voidedAt is timestamp
+        && nonBlank(after.voidMetadata.voidReason) && after.voidMetadata.voidReason.size() <= 1000
+        && after.diff(before).affectedKeys().hasOnly(['status', 'voidMetadata', 'updatedAt', 'revision']);
+    }
+
     match /users/{uid} {
       allow get: if isOwner(uid);
       allow list: if false;
@@ -478,6 +516,12 @@ service cloud.firestore {
         allow delete: if false;
       }
 
+      match /budgets/{budgetId} {
+        allow create: if isOwner(uid) && validId(budgetId)
+          && validNewBudget(uid, request.resource.data);
+        allow update, delete: if false;
+      }
+
       match /accounts/{accountId} {
         allow create: if isOwner(uid)
           && validNewAccount(uid, accountId, request.resource.data);
@@ -504,7 +548,8 @@ service cloud.firestore {
             )
           );
 
-        allow update, delete: if false;
+        allow update: if isOwner(uid) && validExpenseVoid();
+        allow delete: if false;
       }
 
       match /{collectionId}/{documentId} {

@@ -269,3 +269,123 @@ test('reactivation of a cancelled payment is denied', async () => {
 test('owner cannot delete an expected payment', async () => {
   await deniedUnchanged(() => deleteDoc(paymentRef()));
 });
+
+
+// PR #4: immutable budgets and one-way expense voids, matching FoundationCodec.
+function budget(overrides = {}) {
+  return {
+    scope: 'OVERALL_DISCRETIONARY', periodType: 'MONTHLY', limitLkrMinor: 5_000_000,
+    effectiveFrom: date, rolloverEnabled: false, state: 'ACTIVE',
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0, ...overrides,
+  };
+}
+function voidPatch(overrides = {}) {
+  return {
+    status: 'VOIDED', voidMetadata: { voidedAt: audit, voidReason: 'Duplicate entry' },
+    updatedAt: serverTimestamp(), revision: 1, ...overrides,
+  };
+}
+async function postedExpense() {
+  await assertSucceeds(setDoc(eventRef('void-target'), event('void-target', 'EXPENSE', -50_000)));
+  return (await getDoc(eventRef('void-target'))).data();
+}
+async function deniedVoid(patch, before, client = db) {
+  await assertFails(updateDoc(eventRef('void-target', client), patch));
+  assert.deepEqual((await getDoc(eventRef('void-target'))).data(), before);
+}
+
+test('owner creates both codec-shaped budget scopes with server audit data', async () => {
+  for (const [id, overrides] of [
+    ['overall', {}], ['category', { scope: 'CATEGORY_DISCRETIONARY', categoryId: 'food', periodType: 'WEEKLY', effectiveTo: '2026-12-31' }],
+  ]) {
+    const ref = doc(db, root, 'budgets', id);
+    await assertSucceeds(setDoc(ref, budget(overrides)));
+    const saved = (await getDoc(ref)).data();
+    assert.ok(saved.createdAt instanceof Timestamp);
+    assert.deepEqual(saved.createdAt, saved.updatedAt);
+    assert.equal(saved.revision, 0);
+    await assertFails(updateDoc(ref, { limitLkrMinor: 10 }));
+    await assertFails(deleteDoc(ref));
+    assert.deepEqual((await getDoc(ref)).data(), saved);
+  }
+});
+
+test('invalid budgets and forged audit fields are denied without creating records', async () => {
+  const invalid = [
+    { limitLkrMinor: 0 }, { limitLkrMinor: -1 }, { limitLkrMinor: 1.001 }, { limitLkrMinor: 100000000001 },
+    { scope: 'OTHER' }, { periodType: 'DAILY' }, { rolloverEnabled: true }, { state: 'ARCHIVED' },
+    { categoryId: 'food' }, { scope: 'CATEGORY_DISCRETIONARY' },
+    { scope: 'CATEGORY_DISCRETIONARY', categoryId: 'missing' },
+    { scope: 'CATEGORY_DISCRETIONARY', categoryId: 123 },
+    { effectiveFrom: '2026-02-30' }, { effectiveTo: '2026-01-01' }, { effectiveTo: null },
+    { revision: 1 }, { createdAt: audit }, { updatedAt: audit }, { extra: true },
+  ];
+  for (const [i, patch] of invalid.entries()) {
+    const ref = doc(db, root, 'budgets', `invalid-${i}`);
+    await assertFails(setDoc(ref, budget(patch)));
+    assert.equal((await getDoc(ref)).exists(), false);
+  }
+});
+
+for (const identity of ['other-user', null]) {
+  test(`${identity ?? 'unauthenticated'} cannot access budgets or void an owner's expense`, async () => {
+    const client = identity ? environment.authenticatedContext(identity).firestore() : environment.unauthenticatedContext().firestore();
+    await setDoc(doc(db, root, 'budgets', 'private'), budget());
+    const ref = doc(client, root, 'budgets', 'private');
+    await assertFails(getDoc(ref));
+    await assertFails(getDocs(collection(client, root, 'budgets')));
+    await assertFails(setDoc(doc(client, root, 'budgets', 'new'), budget()));
+    await assertFails(updateDoc(ref, { limitLkrMinor: 1 }));
+    await assertFails(deleteDoc(ref));
+    assert.equal((await getDoc(doc(db, root, 'budgets', 'new'))).exists(), false);
+    const before = await postedExpense();
+    await deniedVoid(voidPatch(), before, client);
+  });
+}
+
+test('expense void saves Firestore timestamps and revision one, preserving every original financial and creation field', async () => {
+  const before = await postedExpense();
+  await assertSucceeds(updateDoc(eventRef('void-target'), voidPatch()));
+  const saved = (await getDoc(eventRef('void-target'))).data();
+  assert.ok(saved.voidMetadata.voidedAt instanceof Timestamp);
+  assert.ok(saved.updatedAt instanceof Timestamp);
+  assert.deepEqual(saved.voidMetadata, { voidedAt: audit, voidReason: 'Duplicate entry' });
+  assert.equal(saved.revision, 1);
+  assert.equal(saved.status, 'VOIDED');
+  const { status, revision, updatedAt, voidMetadata, ...unchanged } = saved;
+  assert.deepEqual(unchanged, Object.fromEntries(Object.entries(before).filter(([key]) => !['status', 'revision'].includes(key))));
+  await deniedVoid(voidPatch({ revision: 2 }), saved);
+  await deniedVoid({ status: 'POSTED', revision: 2, updatedAt: serverTimestamp(), voidMetadata: deleteField() }, saved);
+  await assertFails(deleteDoc(eventRef('void-target')));
+  assert.deepEqual((await getDoc(eventRef('void-target'))).data(), saved);
+});
+
+test('expense void rejects invalid lifecycle and audit data and any mutation/removal of original fields', async () => {
+  const before = await postedExpense();
+  for (const patch of [
+    { revision: 0 }, { revision: 2 }, { updatedAt: audit }, { updatedAt: deleteField() },
+    { voidMetadata: { voidedAt: '2026-11-05', voidReason: 'reason' } },
+    { voidMetadata: { voidedAt: audit, voidReason: '   ' } },
+    { voidMetadata: { voidedAt: audit, voidReason: 'x'.repeat(1001) } },
+    { voidMetadata: { voidedAt: audit, voidReason: 'reason', extra: true } },
+    { voidMetadata: deleteField() }, { status: 'POSTED' }, { unknown: true },
+  ]) await deniedVoid(voidPatch(patch), before);
+  // This includes all monetary movements/components, query IDs, operation ID,
+  // schema version, original date/time, and createdAt/clientCreatedAt audit data.
+  for (const key of Object.keys(before).filter(key => !['status', 'revision'].includes(key))) {
+    await deniedVoid(voidPatch({ [key]: deleteField() }), before);
+  }
+  await deniedVoid(voidPatch({ movements: [{ ...before.movements[0], amountMinor: -1 }] }), before);
+  await deniedVoid(voidPatch({ components: [{ ...before.components[0], amountLkrMinor: 1 }] }), before);
+  await deniedVoid(voidPatch({ createdAt: serverTimestamp() }), before);
+});
+
+test('income receipts and openings cannot be voided and already-voided expenses cannot be created', async () => {
+  await assertFails(updateDoc(eventRef('existing-manual'), voidPatch()));
+  await assertSucceeds(receiptBatch().commit());
+  await assertFails(updateDoc(eventRef(receiptId(0)), voidPatch()));
+  await assertSucceeds(openingBatch().commit());
+  await assertFails(updateDoc(eventRef('new-opening'), voidPatch()));
+  await assertFails(setDoc(eventRef('born-void'), { ...event('born-void', 'EXPENSE', -50_000), ...voidPatch() }));
+  assert.equal((await getDoc(eventRef('born-void'))).exists(), false);
+});
