@@ -170,6 +170,37 @@ class P04PlanningCalculationsTest {
         }
     }
 
+    @Test fun utilityActualReducesAvailableFundsWithoutChangingBalanceAndPaymentDoesNotDeductTwice() {
+        val utility = MonthlyBill(Occurrence(
+            "electricity", date, date, ScheduleKind.COMMITMENT, "Electricity",
+            EntryAmount(Money.lkr(800_000L)), zone, categoryId = "utilities",
+            commitmentClass = CommitmentClass.COMMITTED, amountMode = AmountMode.ESTIMATE,
+        ), paidMinor = 0L)
+        val ledger = summarizeHomeLedger(CompleteLedger(emptyList()), date, zone)
+        val balance = 2_000_000L
+        val estimated = requireNotNull(recordedHomeFunds(ledger, balance, setOf("bank"), listOf(utility)))
+        val actualBill = utility.copy(actualAmount = EntryAmount(Money.lkr(950_000L)))
+        val actual = requireNotNull(recordedHomeFunds(ledger, balance, setOf("bank"), listOf(actualBill)))
+        assertEquals(150_000L, estimated.availableAfterConfirmedReservationsMinor - actual.availableAfterConfirmedReservationsMinor)
+        assertEquals(balance, actual.input.eligibleBalanceMinor)
+        val payment = FinancialTransaction(
+            operationId = "utility-payment", kind = TransactionKind.EXPENSE, status = TransactionStatus.POSTED,
+            financialTime = FinancialTime(now, date, zone), clientCreatedAt = now,
+            movements = listOf(AccountMovement("bank", NativeAmount.Fiat(Money.lkr(-950_000L)))),
+            components = listOf(ReportComponent(ComponentNature.SPENDING, KnownLkrAmount.Known(Money.lkr(950_000L)),
+                categoryId = "utilities", commitmentClass = CommitmentClass.COMMITTED)),
+            occurrenceId = utility.occurrence.id,
+        )
+        val after = summarizeHomeLedger(CompleteLedger(listOf(payment)), date, zone)
+        val paid = actualBill.copy(paidMinor = 950_000L)
+        val afterFunds = requireNotNull(recordedHomeFunds(after, balance - 950_000L, setOf("bank"), listOf(paid)))
+        assertEquals(0L, paid.remainingMinor)
+        assertEquals(1_050_000L, afterFunds.input.eligibleBalanceMinor)
+        assertEquals(actual.availableAfterConfirmedReservationsMinor, afterFunds.availableAfterConfirmedReservationsMinor)
+        val next = MonthlyBill(utility.occurrence.copy(nominalDate = date.plusMonths(1), effectiveDueDate = date.plusMonths(1)), 0L)
+        assertEquals(800_000L, next.remainingMinor)
+    }
+
     @Test fun homeWaitsForBothBillAndLedgerSnapshotsAndDoesNotDeductPartialPaymentsTwice() {
         val rent = MonthlyBill(
             Occurrence(

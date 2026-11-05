@@ -125,5 +125,49 @@ class MonthlyBillCodecTest {
         assertEquals(expense.components, saved.components)
     }
 
+    @Test
+    fun estimateAndActualRoundTripWithoutChangingNextMonthsSnapshot() {
+        val estimate = bill.copy(amountMode = AmountMode.ESTIMATE, expectedAmount = EntryAmount(Money.lkr(800_000)))
+        val (schedule, first) = FoundationCodec.firstMonthlyBillData(estimate)
+        val id = StableIds.occurrence(bill.id, date)
+        val initial = FoundationCodec.monthlyBill(id, first + auditFields())
+        assertEquals("ESTIMATE", schedule["amountMode"])
+        assertEquals(800_000L, initial.remainingMinor)
+        val patch = FoundationCodec.monthlyBillActualData(initial, EntryAmount(Money.lkr(950_000)))
+        assertEquals(setOf("actualAmountMinor", "updatedAt", "revision"), patch.keys)
+        val actual = FoundationCodec.monthlyBill(id, first + patch + auditFields())
+        assertEquals(950_000L, actual.remainingMinor)
+        assertEquals(800_000L, actual.occurrence.expectedAmount.money.minor)
+        val paid = FoundationCodec.monthlyBill(id, first + patch + auditFields() + mapOf(
+            "paidAmountMinor" to 950_000L, "lastBillExpenseId" to "payment", "revision" to 2L,
+        ))
+        assertEquals(0L, paid.remainingMinor)
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.monthlyBillActualData(paid, EntryAmount(Money.lkr(949_999)))
+        }
+        val nextDate = date.plusMonths(1)
+        val next = initial.occurrence.copy(nominalDate = nextDate, effectiveDueDate = nextDate)
+        val nextBill = FoundationCodec.monthlyBill(next.id, FoundationCodec.monthlyBillOccurrenceData(next) + auditFields())
+        assertEquals(800_000L, nextBill.remainingMinor)
+        assertEquals(null, nextBill.actualAmount)
+        assertEquals(AmountMode.ESTIMATE, nextBill.occurrence.amountMode)
+    }
+
+    @Test
+    fun fixedBillsCannotAcquireActualAmountsAndActualCannotUnderstatePaidHistory() {
+        val first = FoundationCodec.firstMonthlyBillData(bill).second + auditFields()
+        val fixed = FoundationCodec.monthlyBill(StableIds.occurrence(bill.id, date), first)
+        assertEquals(AmountMode.FIXED, fixed.occurrence.amountMode)
+        assertThrows(IllegalArgumentException::class.java) {
+            FoundationCodec.monthlyBillActualData(fixed, EntryAmount(Money.lkr(950_000)))
+        }
+        for (invalid in listOf(
+            first + mapOf("actualAmountMinor" to 950_000L, "revision" to 1L),
+            first + mapOf("amountMode" to "ESTIMATE", "actualAmountMinor" to 0L, "revision" to 1L),
+            first + mapOf("amountMode" to "ESTIMATE", "actualAmountMinor" to 950_000L, "revision" to 1L,
+                "paidAmountMinor" to 950_001L, "lastBillExpenseId" to "payment"),
+        )) assertThrows(IllegalArgumentException::class.java) { FoundationCodec.monthlyBill(fixed.occurrence.id, invalid) }
+    }
+
     private fun auditFields() = mapOf("createdAt" to audit, "updatedAt" to audit)
 }

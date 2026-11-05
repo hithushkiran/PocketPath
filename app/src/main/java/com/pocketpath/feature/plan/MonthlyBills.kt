@@ -19,6 +19,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.pocketpath.domain.model.AmountMode
 import com.pocketpath.domain.model.Account
 import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.MonthlyBill
@@ -91,10 +92,17 @@ internal fun MonthlyBillDialog(
                     enabled = editable,
                     onSelected = { onEvent(FinanceEvent.EditMonthlyBill(categoryId = it)) },
                 )
+                FinanceChoice(
+                    label = "Amount type",
+                    selectedId = if (form.estimate) "estimate" else "fixed",
+                    options = listOf("fixed" to "Fixed", "estimate" to "Monthly estimate"),
+                    enabled = editable,
+                    onSelected = { onEvent(FinanceEvent.EditMonthlyBill(estimate = it == "estimate")) },
+                )
                 OutlinedTextField(
                     value = form.amount,
                     onValueChange = { onEvent(FinanceEvent.EditMonthlyBill(amount = it)) },
-                    label = { Text("Monthly amount (LKR)") },
+                    label = { Text(if (form.estimate) "Monthly estimate (LKR)" else "Monthly amount (LKR)") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                     enabled = editable,
                     singleLine = true,
@@ -152,8 +160,13 @@ internal fun MonthlyBillCard(
             Text(bill.occurrence.titleSnapshot, style = MaterialTheme.typography.titleMedium)
             Text("Due $due · $status")
             Text("Paid ${lkrText(bill.paidMinor)} · Remaining ${lkrText(bill.remainingMinor)}")
-            if (bill.remainingMinor > 0L) {
-                OutlinedButton(onClick = onPay, enabled = canPay) { Text("Record payment") }
+            if (bill.occurrence.amountMode == AmountMode.ESTIMATE) {
+                Text("Estimate ${lkrText(bill.occurrence.expectedAmount.money.minor)} · Actual ${bill.actualAmount?.money?.minor?.let(::lkrText) ?: "not entered"}")
+            }
+            if (bill.remainingMinor > 0L || bill.occurrence.amountMode == AmountMode.ESTIMATE) {
+                OutlinedButton(onClick = onPay, enabled = canPay) {
+                    Text(if (bill.occurrence.amountMode == AmountMode.ESTIMATE) "Actual amount / payment" else "Record payment")
+                }
             }
         }
     }
@@ -176,6 +189,20 @@ internal fun BillPaymentDialog(
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 remainingMinor?.let { Text("Remaining ${lkrText(it)}") }
+                if (form.estimate) {
+                    OutlinedTextField(
+                        value = form.actualAmount,
+                        onValueChange = { onEvent(FinanceEvent.EditBillPayment(actualAmount = it)) },
+                        label = { Text("This bill's actual amount (LKR)") },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        enabled = editable,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    OutlinedButton(onClick = { onEvent(FinanceEvent.SaveBillActualAmount) }, enabled = editable) {
+                        Text("Save actual amount")
+                    }
+                }
                 FinanceChoice(
                     label = "Paying account",
                     selectedId = form.accountId,

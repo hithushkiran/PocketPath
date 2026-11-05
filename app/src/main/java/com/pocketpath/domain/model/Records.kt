@@ -141,6 +141,7 @@ data class Occurrence(
     val snoozedUntil: Instant? = null, val confirmedTransactionId: String? = null,
     val metadata: RecordMetadata = RecordMetadata(),
     val confirmedAmount: EntryAmount? = null,
+    val amountMode: AmountMode = AmountMode.FIXED,
 ) {
     val id: String get() = StableIds.occurrence(scheduleId, nominalDate)
     init {
@@ -153,10 +154,19 @@ data class Occurrence(
     }
 }
 
-/** Outstanding amount for a fixed bill, backed by its effective linked expenses. */
-data class MonthlyBill(val occurrence: Occurrence, val paidMinor: Long) {
-    init { require(paidMinor in 0..occurrence.expectedAmount.money.minor) }
-    val remainingMinor: Long get() = occurrence.expectedAmount.money.minor - paidMinor
+/** Outstanding bill amount, backed by its effective linked expenses. */
+data class MonthlyBill(
+    val occurrence: Occurrence,
+    val paidMinor: Long,
+    val actualAmount: EntryAmount? = null,
+) {
+    val dueMinor: Long get() = (actualAmount ?: occurrence.expectedAmount).money.minor
+    init {
+        require(actualAmount == null || (occurrence.amountMode == AmountMode.ESTIMATE &&
+            actualAmount.money.currency == occurrence.expectedAmount.money.currency))
+        require(paidMinor in 0..dueMinor)
+    }
+    val remainingMinor: Long get() = dueMinor - paidMinor
 }
 
 object StableIds {

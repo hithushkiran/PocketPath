@@ -905,3 +905,88 @@ test('recurring income rejects a cross-user schedule, stale revision, forged amo
   assert.equal((await getDoc(reminderOccurrenceRef(id))).data().state, 'OPEN');
   assert.equal((await getDoc(eventRef(`receipt_${id}`))).exists(), false);
 });
+
+
+function utilityPair() {
+  const pair = monthlyBillPair();
+  return {
+    schedule: { ...pair.schedule, title: 'Electricity', expectedAmountMinor: 800_000, amountMode: 'ESTIMATE' },
+    occurrence: { ...pair.occurrence, titleSnapshot: 'Electricity', expectedAmountMinor: 800_000, amountMode: 'ESTIMATE' },
+  };
+}
+function actualPatch(actualAmountMinor, revision) {
+  return { actualAmountMinor, updatedAt: serverTimestamp(), revision };
+}
+
+test('utility actual changes only this bill, posts no money, pays the actual through the existing linked expense, and preserves next estimate', async () => {
+  const pair = utilityPair();
+  await assertSucceeds(writeMonthlyBill(pair));
+  const schedule = (await getDoc(billScheduleRef())).data();
+  const accountBefore = (await getDoc(doc(db, root, 'accounts', 'bank'))).data();
+  const ledgerBefore = (await getDocs(collection(db, root, 'transactions'))).docs.map(item => item.data());
+  await assertSucceeds(updateDoc(billOccurrenceRef(), actualPatch(950_000, 1)));
+  const actual = (await getDoc(billOccurrenceRef())).data();
+  assert.equal(actual.actualAmountMinor, 950_000);
+  assert.equal(actual.expectedAmountMinor, 800_000);
+  assert.equal(actual.paidAmountMinor, undefined);
+  assert.deepEqual((await getDoc(billScheduleRef())).data(), schedule);
+  assert.deepEqual((await getDoc(doc(db, root, 'accounts', 'bank'))).data(), accountBefore);
+  assert.deepEqual((await getDocs(collection(db, root, 'transactions'))).docs.map(item => item.data()), ledgerBefore);
+  await assertFails(writeBillPayment(billPayment('utility-overpayment', 950_001), 950_001, 2));
+  await assertSucceeds(writeBillPayment(billPayment('utility-payment', 950_000), 950_000, 2));
+  const paid = (await getDoc(billOccurrenceRef())).data();
+  assert.equal(paid.actualAmountMinor - paid.paidAmountMinor, 0);
+  assert.equal((await getDoc(eventRef('utility-payment'))).data().movements[0].amountMinor, -950_000);
+  assert.equal((await getDocs(collection(db, root, 'transactions'))).size, ledgerBefore.length + 1);
+  await assertFails(writeBillPayment(billPayment('utility-payment', 950_000), 950_000, 3));
+  await assertFails(updateDoc(billOccurrenceRef(), actualPatch(949_999, 3)));
+  assert.deepEqual((await getDoc(billOccurrenceRef())).data(), paid);
+  const nextDate = '2026-12-30';
+  const next = billOccurrenceRef(db, `${billId}_${nextDate}`);
+  await assertSucceeds(setDoc(next, { ...pair.occurrence, nominalDate: nextDate, effectiveDueDate: nextDate }));
+  assert.equal((await getDoc(next)).data().expectedAmountMinor, 800_000);
+  assert.equal((await getDoc(next)).data().actualAmountMinor, undefined);
+  assert.deepEqual((await getDoc(billScheduleRef())).data(), schedule);
+  // A void still uses the existing paired ledger/paid-total checks after actual entry.
+  const batch = writeBatch(db);
+  batch.update(eventRef('utility-payment'), voidPatch());
+  batch.update(billOccurrenceRef(), billProgress('utility-payment', 0, 3));
+  await assertSucceeds(batch.commit());
+  assert.equal((await getDoc(billOccurrenceRef())).data().actualAmountMinor, 950_000);
+});
+
+test('utility actual edits enforce owner, exact positive amount, revision, immutable snapshot and paid-history floor', async () => {
+  await assertSucceeds(writeMonthlyBill(utilityPair()));
+  const initial = (await getDoc(billOccurrenceRef())).data();
+  for (const patch of [
+    actualPatch(0, 1), actualPatch(-1, 1), actualPatch(1.001, 1), actualPatch(100000000001, 1),
+    actualPatch(950_000, 0), actualPatch(950_000, 2),
+    { ...actualPatch(950_000, 1), updatedAt: audit },
+    { ...actualPatch(950_000, 1), paidAmountMinor: 1 },
+    { ...actualPatch(950_000, 1), expectedAmountMinor: 950_000 },
+    { ...actualPatch(950_000, 1), amountMode: 'FIXED' },
+    { ...actualPatch(950_000, 1), createdAt: serverTimestamp() },
+    { ...actualPatch(950_000, 1), categoryId: 'other-category' },
+  ]) {
+    await assertFails(updateDoc(billOccurrenceRef(), patch));
+    assert.deepEqual((await getDoc(billOccurrenceRef())).data(), initial);
+  }
+  for (const context of [environment.authenticatedContext('other-user'), environment.unauthenticatedContext()]) {
+    await assertFails(updateDoc(billOccurrenceRef(context.firestore()), actualPatch(950_000, 1)));
+  }
+  await assertSucceeds(writeBillPayment(billPayment('utility-partial', 300_000), 300_000, 1));
+  await assertFails(updateDoc(billOccurrenceRef(), actualPatch(299_999, 2)));
+  // A real bill may be below the estimate, provided it covers all prior payments.
+  await assertSucceeds(updateDoc(billOccurrenceRef(), actualPatch(700_000, 2)));
+  assert.equal((await getDoc(billOccurrenceRef())).data().paidAmountMinor, 300_000);
+  await assertSucceeds(writeBillPayment(billPayment('utility-rest', 400_000), 700_000, 3));
+  assert.equal((await getDoc(billOccurrenceRef())).data().paidAmountMinor, 700_000);
+});
+
+test('saved fixed bills remain fixed and retain their payment history', async () => {
+  await assertSucceeds(writeMonthlyBill(monthlyBillPair()));
+  await assertFails(updateDoc(billOccurrenceRef(), actualPatch(950_000, 1)));
+  await assertFails(updateDoc(billOccurrenceRef(), { ...actualPatch(950_000, 1), amountMode: 'ESTIMATE' }));
+  await assertSucceeds(writeBillPayment(billPayment('fixed-payment', 3_400_000), 3_400_000, 1));
+  assert.equal((await getDoc(billOccurrenceRef())).data().paidAmountMinor, 3_400_000);
+});
