@@ -2,12 +2,12 @@ package com.pocketpath.feature.goals
 
 import com.pocketpath.domain.calculation.SavingsPace
 import com.pocketpath.domain.calculation.calculateSavingsPace
+import com.pocketpath.domain.calculation.monthlyGoalDates
 import com.pocketpath.domain.model.Goal
 import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.FiatCurrency
 import com.pocketpath.domain.money.Money
 import java.time.LocalDate
-import java.time.YearMonth
 import java.time.format.DateTimeParseException
 
 enum class GoalField { NAME, TARGET, START_DATE, DEADLINE, FIRST_CONTRIBUTION_DATE }
@@ -47,20 +47,6 @@ data class GoalDraftPreview(
 sealed interface GoalFormResult {
     data class Invalid(val errors: Map<GoalField, String>) : GoalFormResult
     data class Valid(val preview: GoalDraftPreview) : GoalFormResult
-}
-
-/** Preserve the chosen day across short months: Jan 31, Feb 28, Mar 31. */
-fun monthlyGoalDates(first: LocalDate, deadline: LocalDate): List<LocalDate> {
-    require(first <= deadline)
-    val dates = mutableListOf<LocalDate>()
-    var month = YearMonth.from(first)
-    val lastMonth = YearMonth.from(deadline)
-    while (month <= lastMonth) {
-        val date = month.atDay(minOf(first.dayOfMonth, month.lengthOfMonth()))
-        if (date <= deadline) dates += date
-        month = month.plusMonths(1)
-    }
-    return dates.toList()
 }
 
 fun validateGoalForm(form: GoalForm, today: LocalDate): GoalFormResult {

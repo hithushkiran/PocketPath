@@ -10,6 +10,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.pocketpath.domain.calculation.FundsPlanningResult
+import com.pocketpath.domain.calculation.SavedGoalProgress
+import com.pocketpath.feature.goals.SavedGoalPaceDetails
 import com.pocketpath.domain.model.IncomeSource
 import com.pocketpath.feature.finance.FinanceEvent
 import com.pocketpath.feature.finance.FinanceUiState
@@ -22,6 +24,7 @@ fun HomeScreen(
     onAccounts: () -> Unit,
     onAddExpense: () -> Unit,
     incomeSources: List<IncomeSource> = emptyList(),
+    goalProgress: SavedGoalProgress? = null,
 ) {
     val plan = state.homeFunds
     FinanceBody(state, onEvent) {
@@ -63,6 +66,16 @@ fun HomeScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text("Manage accounts")
+            }
+        }
+
+        goalProgress?.let { progress ->
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Savings goal · ${progress.goal.name}", style = MaterialTheme.typography.titleMedium)
+                    Text("Target ${lkrText(progress.goal.target.money.minor)} · Due ${progress.goal.deadline}")
+                    SavedGoalPaceDetails(progress)
+                }
             }
         }
 

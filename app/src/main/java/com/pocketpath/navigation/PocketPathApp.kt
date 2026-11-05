@@ -199,6 +199,7 @@ fun PocketPathApp(
                 HomeScreen(
                     state = financeState,
                     incomeSources = incomeState.sources,
+                    goalProgress = financeState.featuredGoalProgress(goalsState.goals),
                     onEvent = onFinanceEvent,
                     onAccounts = {
                         navController.navigate(Accounts) { launchSingleTop = true }

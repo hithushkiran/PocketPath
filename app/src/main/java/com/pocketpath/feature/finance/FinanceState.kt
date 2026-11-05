@@ -5,6 +5,8 @@ import com.pocketpath.domain.calculation.BalanceUnits
 import com.pocketpath.domain.calculation.FundsPlanningResult
 import com.pocketpath.domain.calculation.HomeLedgerSummary
 import com.pocketpath.domain.calculation.PurchaseImpactPreview
+import com.pocketpath.domain.calculation.SavedGoalProgress
+import com.pocketpath.domain.calculation.calculateSavedGoalProgress
 import com.pocketpath.domain.calculation.previewPurchaseImpact
 import com.pocketpath.domain.calculation.recordedHomeFunds
 import com.pocketpath.domain.calculation.BudgetProgress
@@ -16,6 +18,8 @@ import com.pocketpath.domain.model.BudgetScope
 import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
+import com.pocketpath.domain.model.Goal
+import com.pocketpath.domain.model.GoalState
 import com.pocketpath.domain.model.MonthlyBill
 import com.pocketpath.domain.money.EntryAmount
 import com.pocketpath.domain.money.FiatCurrency
@@ -206,6 +210,25 @@ data class FinanceUiState(
 
     val ready: Boolean
         get() = userId != null && !loading && error == null
+
+    fun savedGoalProgress(goal: Goal): SavedGoalProgress? {
+        if (!ready) return null
+        val ledger = homeLedger ?: return null
+        val reservations = goalReservationsMinor ?: return null
+        val reserved = reservations[goal.id] ?: 0L
+        if (reserved < 0L) return null
+        return calculateSavedGoalProgress(goal, reserved, ledger.date)
+    }
+
+    fun featuredGoalProgress(goals: List<Goal>): SavedGoalProgress? {
+        val reservations = goalReservationsMinor ?: return null
+        val goal = goals.asSequence()
+            .filter { it.state == GoalState.ACTIVE }
+            .minWithOrNull(compareBy<Goal> { (reservations[it.id] ?: 0L) >= it.target.money.minor }
+                .thenBy(Goal::deadline).thenBy(Goal::id))
+            ?: return null
+        return savedGoalProgress(goal)
+    }
 
     val homeFunds: FundsPlanningResult.Ready?
         get() {
