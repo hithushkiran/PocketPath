@@ -253,7 +253,7 @@ service cloud.firestore {
         && validId(id)
         && data.operationId == id
         && data.kind in ['OPENING', 'EXPENSE', 'INCOME', 'GOAL_RESERVE']
-        && (!('occurrenceId' in data) || (data.kind == 'EXPENSE' && validId(data.occurrenceId)))
+        && (!('occurrenceId' in data) || (data.kind in ['EXPENSE', 'INCOME'] && validId(data.occurrenceId)))
         && (
           !('expectedPaymentId' in data)
           || (data.kind == 'INCOME' && validId(data.expectedPaymentId))
@@ -578,6 +578,113 @@ service cloud.firestore {
 
     // The paid total is a projection of linked posted expenses. Both sides
     // of a payment or void must agree on the exact delta in the same commit.
+    function validIncomeReminderSchedule(uid, data) {
+      let source = get(incomeSourcePath(uid, data.incomeSourceId)).data;
+      let account = get(accountPath(uid, data.preferredAccountId)).data;
+      return fields(data, [
+          'kind', 'title', 'frequency', 'interval', 'anchorDate', 'activeFrom', 'timeZone',
+          'expectedAmountMinor', 'currencyCode', 'amountMode', 'incomeSourceId', 'preferredAccountId',
+          'paused', 'reminderLeadDays', 'createdAt', 'updatedAt', 'revision'
+        ], [])
+        && [data.kind, data.currencyCode, data.amountMode, data.timeZone, data.paused]
+          == ['INCOME_REMINDER', 'LKR', 'ESTIMATE', 'Asia/Colombo', false]
+        && data.frequency in ['WEEKLY', 'MONTHLY', 'YEARLY']
+        && data.interval is int && data.interval == 1
+        && data.reminderLeadDays is int && data.reminderLeadDays == 0
+        && nonBlank(data.title) && data.title.size() <= 80
+        && validDate(data.anchorDate) && data.anchorDate >= '0001-01-01' && data.activeFrom == data.anchorDate
+        && validReminderAmount(data.expectedAmountMinor)
+        && data.revision is int && data.revision == 0
+        && data.createdAt == request.time && data.updatedAt == request.time
+        && validId(data.incomeSourceId) && validId(data.preferredAccountId)
+        && source.get('archivedAt', null) == null && source.get('defaultCurrencyCode', 'LKR') == 'LKR'
+        && [account.currencyCode, account.assetClass, account.scale] == ['LKR', 'FIAT', 2]
+        && account.get('archivedAt', null) == null;
+    }
+
+    function validReminderAmount(amount) {
+      return amount is int && amount > 0 && amount <= 100000000000;
+    }
+
+    function reminderTimestamp(date) {
+      return timestamp.date(int(date[0:4]), int(date[5:7]), int(date[8:10]));
+    }
+
+    function validReminderNominalDate(date, schedule) {
+      let anchor = schedule.anchorDate;
+      return date >= anchor && (date == anchor || (
+        schedule.frequency == 'WEEKLY'
+          ? (reminderTimestamp(date).toMillis() - reminderTimestamp(anchor).toMillis()) % 604800000 == 0
+          : validRecurringBillDate(date, anchor)
+            && (schedule.frequency == 'MONTHLY' || date[5:7] == anchor[5:7])
+      ));
+    }
+
+    function validIncomeReminderOccurrenceShape(data) {
+      return fields(data, [
+          'scheduleId', 'nominalDate', 'effectiveDueDate', 'kind', 'titleSnapshot',
+          'expectedAmountMinor', 'currencyCode', 'timeZone', 'sourceId', 'state',
+          'createdAt', 'updatedAt', 'revision'
+        ], ['snoozedUntil', 'confirmedTransactionId', 'confirmedAmountMinor'])
+        && validReminderAmount(data.expectedAmountMinor)
+        && validDate(data.effectiveDueDate) && data.effectiveDueDate >= '0001-01-01'
+        && data.revision is int && data.updatedAt == request.time;
+    }
+
+    function validReminderConfirmation(uid, id, data, receivingAccount) {
+      let receiptId = 'receipt_' + id;
+      let path = eventPath(uid, receiptId);
+      let receipt = getAfter(path).data;
+      return data.confirmedTransactionId == receiptId && !exists(path)
+        && [receipt.kind, receipt.occurrenceId, receipt.createdAt] == ['INCOME', id, request.time]
+        && receipt.movements[0].accountId == receivingAccount
+        && receipt.components[0].incomeSourceId == data.sourceId
+        && validReminderAmount(data.confirmedAmountMinor)
+        && receipt.movements[0].amountMinor == data.confirmedAmountMinor;
+    }
+
+    function validReminderState(uid, id, data, receivingAccount) {
+      return data.state == 'CONFIRMED'
+        ? !('snoozedUntil' in data) && validReminderConfirmation(uid, id, data, receivingAccount)
+        : !('confirmedTransactionId' in data) && !('confirmedAmountMinor' in data) && (
+          (data.state == 'OPEN' && (!('snoozedUntil' in data)
+            || (data.snoozedUntil is timestamp && data.snoozedUntil > request.time)))
+          || (data.state == 'SKIPPED' && !('snoozedUntil' in data))
+        );
+    }
+
+    function validNewReminderOccurrence(uid, id, data) {
+      let schedule = get(billSchedulePath(uid, data.scheduleId)).data;
+      return validId(data.scheduleId) && validDate(data.nominalDate)
+        && id == data.scheduleId + '_' + data.nominalDate
+        && [data.kind, data.titleSnapshot, data.sourceId, data.timeZone, data.currencyCode]
+          == ['INCOME_REMINDER', schedule.title, schedule.incomeSourceId, 'Asia/Colombo', 'LKR']
+        && schedule.kind == 'INCOME_REMINDER' && validReminderNominalDate(data.nominalDate, schedule)
+        && data.createdAt == request.time && data.revision == 0
+        && validIncomeReminderOccurrenceShape(data)
+        && validReminderState(uid, id, data, schedule.preferredAccountId);
+    }
+
+    function validReminderOccurrenceUpdate(uid, id, before, after) {
+      let keys = after.diff(before).affectedKeys();
+      return after.revision == before.revision + 1 && validIncomeReminderOccurrenceShape(after)
+        && (before.state == 'SKIPPED'
+          ? after.state == 'OPEN' && keys.hasOnly(['state', 'revision', 'updatedAt'])
+          : before.state == 'OPEN' && keys.hasOnly([
+            'state', 'expectedAmountMinor', 'effectiveDueDate', 'snoozedUntil',
+            'confirmedTransactionId', 'confirmedAmountMinor', 'revision', 'updatedAt'
+          ]) && (after.state == 'OPEN' || !keys.hasAny(['expectedAmountMinor', 'effectiveDueDate']))
+            && validReminderState(uid, id, after, get(billSchedulePath(uid, before.scheduleId)).data.preferredAccountId));
+    }
+
+    function validScheduledIncomeLink(uid, id, data) {
+      let occurrence = getAfter(billOccurrencePath(uid, data.occurrenceId)).data;
+      return id == 'receipt_' + data.occurrenceId && !('expectedPaymentId' in data)
+        && !('originalCurrency' in data.components[0])
+        && [occurrence.kind, occurrence.state, occurrence.confirmedTransactionId, occurrence.updatedAt]
+          == ['INCOME_REMINDER', 'CONFIRMED', id, request.time];
+    }
+
     function validBillExpenseDelta(occurrenceId, before, after, expenseId, expense, direction) {
       let component = expense.components[0];
       return before.kind == 'COMMITMENT' && before.state == 'OPEN'
@@ -855,15 +962,21 @@ service cloud.firestore {
 
       match /schedules/{scheduleId} {
         allow create: if isOwner(uid) && validId(scheduleId)
-          && validFirstMonthlyBill(uid, scheduleId, request.resource.data);
+          && (request.resource.data.kind == 'INCOME_REMINDER'
+            ? validIncomeReminderSchedule(uid, request.resource.data)
+            : validFirstMonthlyBill(uid, scheduleId, request.resource.data));
         allow update, delete: if false;
       }
 
       match /occurrences/{occurrenceId} {
         allow create: if isOwner(uid) && validId(occurrenceId)
-          && validId(request.resource.data.scheduleId)
-          && validBillOccurrence(uid, occurrenceId, request.resource.data);
-        allow update: if isOwner(uid) && validBillPaymentUpdate(uid, occurrenceId);
+          && (request.resource.data.kind == 'INCOME_REMINDER'
+            ? validNewReminderOccurrence(uid, occurrenceId, request.resource.data)
+            : validId(request.resource.data.scheduleId) && validBillOccurrence(uid, occurrenceId, request.resource.data));
+        allow update: if isOwner(uid)
+          && (resource.data.kind == 'INCOME_REMINDER'
+            ? validReminderOccurrenceUpdate(uid, occurrenceId, resource.data, request.resource.data)
+            : validBillPaymentUpdate(uid, occurrenceId));
         allow delete: if false;
       }
 
@@ -915,7 +1028,9 @@ service cloud.firestore {
             || (
               request.resource.data.kind == 'INCOME'
               && validIncome(uid, request.resource.data)
-              && validIncomeExpectedLink(uid, transactionId, request.resource.data)
+              && ('occurrenceId' in request.resource.data
+                ? validScheduledIncomeLink(uid, transactionId, request.resource.data)
+                : validIncomeExpectedLink(uid, transactionId, request.resource.data))
             )
             || (
               request.resource.data.kind == 'GOAL_RESERVE'

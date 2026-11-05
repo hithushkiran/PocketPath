@@ -6,6 +6,7 @@ import com.pocketpath.domain.model.Schedule
 import com.pocketpath.domain.model.ScheduleKind
 import java.time.LocalDate
 import java.time.YearMonth
+import java.time.temporal.ChronoUnit
 
 /**
  * Deterministically expands an income-reminder schedule into candidate occurrences.
@@ -28,8 +29,8 @@ object OccurrenceCalculator {
         val upperBound = minOf(windowEndInclusive, schedule.endDate ?: windowEndInclusive)
         if (upperBound < lowerBound) return emptyList()
 
-        return nominalDates(schedule, upperBound)
-            .filter { it >= lowerBound }
+        return nominalDates(schedule, lowerBound, upperBound)
+            .filter { it in lowerBound..upperBound }
             .map { nominalDate ->
                 Occurrence(
                     scheduleId = schedule.id,
@@ -48,11 +49,14 @@ object OccurrenceCalculator {
     fun monthlyDate(anchor: LocalDate, month: YearMonth): LocalDate =
         month.atDay(minOf(anchor.dayOfMonth, month.lengthOfMonth()))
 
-    private fun nominalDates(schedule: Schedule, upperBound: LocalDate): Sequence<LocalDate> = sequence {
+    private fun nominalDates(
+        schedule: Schedule, lowerBound: LocalDate, upperBound: LocalDate,
+    ): Sequence<LocalDate> = sequence {
         val recurrence = schedule.recurrence
         when (recurrence.frequency) {
             Frequency.WEEKLY -> {
-                var date = recurrence.anchorDate
+                val weeks = ChronoUnit.WEEKS.between(recurrence.anchorDate, lowerBound)
+                var date = recurrence.anchorDate.plusWeeks(weeks)
                 while (date <= upperBound) {
                     yield(date)
                     date = date.plusWeeks(1)
@@ -60,7 +64,7 @@ object OccurrenceCalculator {
             }
 
             Frequency.MONTHLY -> {
-                var month = YearMonth.from(recurrence.anchorDate)
+                var month = YearMonth.from(lowerBound)
                 while (!month.atDay(1).isAfter(upperBound)) {
                     // Keep the original anchor on the schedule; only this occurrence's date clamps.
                     yield(monthlyDate(recurrence.anchorDate, month))
@@ -69,7 +73,7 @@ object OccurrenceCalculator {
             }
 
             Frequency.YEARLY -> {
-                var year = recurrence.anchorDate.year
+                var year = lowerBound.year
                 while (year <= upperBound.year) {
                     val month = YearMonth.of(year, recurrence.anchorDate.monthValue)
                     yield(month.atDay(minOf(recurrence.anchorDate.dayOfMonth, month.lengthOfMonth())))

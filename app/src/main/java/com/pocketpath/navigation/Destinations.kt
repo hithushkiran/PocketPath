@@ -11,6 +11,7 @@ import kotlinx.serialization.Serializable
 @Serializable data object CryptoWallets
 @Serializable data object RecordIncome
 @Serializable data object IncomeSources
+@Serializable data object IncomeReminders
 @Serializable data object ExpectedPayments
 @Serializable data object CreateExpectedPayment
 @Serializable data object Settings

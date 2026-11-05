@@ -448,7 +448,8 @@ internal object FoundationCodec {
         }
         event.occurrenceId?.let {
             checkId(it)
-            require(event.kind == TransactionKind.EXPENSE)
+            require(event.kind == TransactionKind.EXPENSE || (event.kind == TransactionKind.INCOME &&
+                event.expectedPaymentId == null && event.id == StableIds.scheduledReceipt(it)))
         }
         require(event.originalTransactionId == null && event.goalPlanId == null)
         require(trade == null || event.merchantLabel == null && event.replacesTransactionId == null)
@@ -709,7 +710,8 @@ internal object FoundationCodec {
             components = components,
             reservationEffects = effects,
             occurrenceId = data.optionalText("occurrenceId")?.also(::checkId)?.also {
-                require(kind == TransactionKind.EXPENSE)
+                require(kind == TransactionKind.EXPENSE || (kind == TransactionKind.INCOME &&
+                    "expectedPaymentId" !in data && id == StableIds.scheduledReceipt(it)))
             },
             expectedPaymentId = data.optionalText("expectedPaymentId")?.also(::checkId),
             note = data.optionalText("note"),
@@ -761,6 +763,113 @@ internal object FoundationCodec {
     }
 
     /** The first fixed monthly LKR bill and its first due occurrence share one immutable save. */
+    fun incomeReminderScheduleData(schedule: Schedule): Map<String, Any> {
+        checkId(schedule.id)
+        val source = requireNotNull(schedule.incomeSourceId).also(::checkId)
+        val account = requireNotNull(schedule.preferredAccountId).also(::checkId)
+        require(schedule.kind == ScheduleKind.INCOME_REMINDER && schedule.amountMode == AmountMode.ESTIMATE)
+        require(schedule.expectedAmount.money.currency == FiatCurrency.LKR && schedule.timeZone.id == "Asia/Colombo")
+        require(schedule.activeFrom == schedule.recurrence.anchorDate && schedule.activeFrom.year in 1..9999)
+        require(schedule.title.length <= 80 && !schedule.paused && schedule.endDate == null)
+        require(schedule.metadata == RecordMetadata() && schedule.remindLocalTime == null && schedule.reminderLeadDays == 0)
+        require(schedule.lastConfirmedAmount == null)
+        return mapOf(
+            "kind" to schedule.kind.name,
+            "title" to schedule.title,
+            "frequency" to schedule.recurrence.frequency.name,
+            "interval" to 1L,
+            "anchorDate" to schedule.activeFrom.toString(),
+            "activeFrom" to schedule.activeFrom.toString(),
+            "timeZone" to schedule.timeZone.id,
+            "expectedAmountMinor" to schedule.expectedAmount.money.minor,
+            "currencyCode" to "LKR",
+            "amountMode" to schedule.amountMode.name,
+            "incomeSourceId" to source,
+            "preferredAccountId" to account,
+            "paused" to false,
+            "reminderLeadDays" to 0L,
+            "createdAt" to FieldValue.serverTimestamp(),
+            "updatedAt" to FieldValue.serverTimestamp(),
+            "revision" to 0L,
+        )
+    }
+
+    fun incomeReminderSchedule(id: String, data: FirestoreFields): Schedule {
+        checkId(id)
+        data.checkKeys(setOf(
+            "kind", "title", "frequency", "interval", "anchorDate", "activeFrom", "timeZone",
+            "expectedAmountMinor", "currencyCode", "amountMode", "incomeSourceId", "preferredAccountId",
+            "paused", "reminderLeadDays", "createdAt", "updatedAt", "revision",
+        ))
+        val anchor = LocalDate.parse(data.text("anchorDate"))
+        require(data.text("kind") == "INCOME_REMINDER" && data.text("amountMode") == "ESTIMATE")
+        require(data.text("currencyCode") == "LKR" && data.text("timeZone") == "Asia/Colombo")
+        require(data.text("activeFrom") == anchor.toString() && data.integer("interval") == 1L)
+        require(!data.boolean("paused") && data.integer("reminderLeadDays") == 0L && data.integer("revision") == 0L)
+        return Schedule(
+            id, ScheduleKind.INCOME_REMINDER, data.text("title"),
+            Recurrence(Frequency.valueOf(data.text("frequency")), anchor), ZoneId.of(data.text("timeZone")),
+            EntryAmount(Money.lkr(data.integer("expectedAmountMinor"))), AmountMode.ESTIMATE, anchor,
+            incomeSourceId = data.text("incomeSourceId").also(::checkId),
+            preferredAccountId = data.text("preferredAccountId").also(::checkId),
+            metadata = RecordMetadata(createdAt = data.instant("createdAt"), updatedAt = data.instant("updatedAt")),
+        )
+    }
+
+    fun incomeReminderOccurrenceData(occurrence: Occurrence): Map<String, Any> = buildMap {
+        require(occurrence.kind == ScheduleKind.INCOME_REMINDER && occurrence.expectedAmount.money.currency == FiatCurrency.LKR)
+        put("scheduleId", occurrence.scheduleId.also(::checkId))
+        put("nominalDate", occurrence.nominalDate.toString())
+        put("effectiveDueDate", occurrence.effectiveDueDate.toString())
+        put("kind", occurrence.kind.name)
+        put("titleSnapshot", occurrence.titleSnapshot)
+        put("expectedAmountMinor", occurrence.expectedAmount.money.minor)
+        put("currencyCode", "LKR")
+        put("timeZone", occurrence.timeZone.id)
+        put("sourceId", requireNotNull(occurrence.sourceId).also(::checkId))
+        put("state", occurrence.state.name)
+        put("createdAt", occurrence.metadata.createdAt?.let(::timestamp) ?: FieldValue.serverTimestamp())
+        put("updatedAt", FieldValue.serverTimestamp())
+        put("revision", occurrence.metadata.revision)
+        occurrence.snoozedUntil?.let { put("snoozedUntil", timestamp(it)) }
+        occurrence.confirmedTransactionId?.let { put("confirmedTransactionId", it) }
+        occurrence.confirmedAmount?.let { put("confirmedAmountMinor", it.money.minor) }
+    }
+
+    fun incomeReminderOccurrence(id: String, data: FirestoreFields): Occurrence {
+        data.checkKeys(setOf(
+            "scheduleId", "nominalDate", "effectiveDueDate", "kind", "titleSnapshot", "expectedAmountMinor",
+            "currencyCode", "timeZone", "sourceId", "state", "createdAt", "updatedAt", "revision",
+        ), setOf("snoozedUntil", "confirmedTransactionId", "confirmedAmountMinor"))
+        require(data.text("kind") == "INCOME_REMINDER" && data.text("currencyCode") == "LKR")
+        require(data.text("timeZone") == "Asia/Colombo")
+        val state = OccurrenceState.valueOf(data.text("state"))
+        require(state in setOf(OccurrenceState.OPEN, OccurrenceState.SKIPPED, OccurrenceState.CONFIRMED))
+        val occurrence = Occurrence(
+            scheduleId = data.text("scheduleId").also(::checkId),
+            nominalDate = LocalDate.parse(data.text("nominalDate")),
+            effectiveDueDate = LocalDate.parse(data.text("effectiveDueDate")),
+            kind = ScheduleKind.INCOME_REMINDER,
+            titleSnapshot = data.text("titleSnapshot"),
+            expectedAmount = EntryAmount(Money.lkr(data.integer("expectedAmountMinor"))),
+            timeZone = ZoneId.of(data.text("timeZone")),
+            sourceId = data.text("sourceId").also(::checkId),
+            state = state,
+            snoozedUntil = data.optionalInstant("snoozedUntil"),
+            confirmedTransactionId = data.optionalText("confirmedTransactionId"),
+            confirmedAmount = data.optionalInteger("confirmedAmountMinor")?.let { EntryAmount(Money.lkr(it)) },
+            metadata = RecordMetadata(
+                createdAt = data.instant("createdAt"), updatedAt = data.instant("updatedAt"),
+                revision = data.integer("revision"),
+            ),
+        )
+        require(occurrence.id == id && (state == OccurrenceState.OPEN || occurrence.snoozedUntil == null))
+        require(state != OccurrenceState.CONFIRMED || (
+            occurrence.confirmedTransactionId == StableIds.scheduledReceipt(id) && occurrence.confirmedAmount != null
+        ))
+        return occurrence
+    }
+
     fun firstMonthlyBillData(schedule: Schedule): Pair<Map<String, Any>, Map<String, Any>> {
         checkId(schedule.id)
         val categoryId = requireNotNull(schedule.categoryId).also(::checkId)

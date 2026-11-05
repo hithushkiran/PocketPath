@@ -10,6 +10,7 @@ import com.google.firebase.firestore.MetadataChanges
 import com.google.firebase.firestore.Query
 import com.google.firebase.firestore.QuerySnapshot
 import com.google.firebase.firestore.Source
+import com.google.firebase.firestore.Transaction
 import com.pocketpath.data.firebase.FoundationCodec
 import com.pocketpath.data.firebase.UserCollection
 import com.pocketpath.data.firebase.UserFirestoreScope
@@ -19,6 +20,9 @@ import com.pocketpath.domain.calculation.ManualCryptoTrade
 import com.pocketpath.domain.calculation.planManualCryptoTrade
 import com.pocketpath.domain.calculation.BalanceUnits
 import com.pocketpath.domain.calculation.OccurrenceCalculator
+import com.pocketpath.domain.calculation.IncomeOccurrenceTransitions
+import com.pocketpath.domain.calculation.IncomeReminderAction
+import com.pocketpath.domain.calculation.scheduledIncomeReceipt
 import com.pocketpath.domain.calculation.accountBalance
 import com.pocketpath.domain.model.*
 import com.pocketpath.domain.money.*
@@ -291,6 +295,156 @@ class FirebaseFoundationRepository internal constructor(
             writeState = WriteState.CLOUD_CONFIRMED,
             replayed = result.replayed,
         )
+    }
+
+    fun observeIncomeReminderSchedules(): Flow<Observation<List<Schedule>>> = observeQuery(
+        query = {
+            owned.collection(UserCollection.SCHEDULES)
+                .whereEqualTo("kind", ScheduleKind.INCOME_REMINDER.name).limit(5001)
+        },
+        completeHistory = false,
+        coverageKey = "income-reminder-schedules-v1",
+    ) { snapshot ->
+        checkLimit(snapshot)
+        snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
+            .map { FoundationCodec.incomeReminderSchedule(it.id, requireNotNull(it.data)) }
+    }
+
+    fun observeIncomeReminderOccurrences(): Flow<Observation<List<Occurrence>>> = observeQuery(
+        query = {
+            owned.collection(UserCollection.OCCURRENCES)
+                .whereEqualTo("kind", ScheduleKind.INCOME_REMINDER.name).limit(5001)
+        },
+        completeHistory = false,
+        coverageKey = "income-reminder-occurrences-v1",
+    ) { snapshot ->
+        checkLimit(snapshot)
+        snapshot.documents.filterNot { it.metadata.hasPendingWrites() }
+            .map { FoundationCodec.incomeReminderOccurrence(it.id, requireNotNull(it.data)) }
+    }
+
+    suspend fun saveIncomeReminderSchedule(schedule: Schedule): CommandResult<Unit> = command(schedule.id) {
+        val data = FoundationCodec.incomeReminderScheduleData(schedule)
+        val reference = owned.collection(UserCollection.SCHEDULES).document(schedule.id)
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val existing = transaction.get(reference)
+            if (existing.exists()) {
+                val auditFields = setOf("createdAt", "updatedAt")
+                if (existing.data?.filterKeys { it !in auditFields } != data.filterKeys { it !in auditFields }) {
+                    throw conflict()
+                }
+                true
+            } else {
+                requireIncomeReminderReferences(transaction, schedule)
+                transaction.set(reference, data)
+                false
+            }
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
+    suspend fun actOnIncomeReminder(
+        scheduleId: String,
+        nominalDate: LocalDate,
+        expectedRevision: Long?,
+        action: IncomeReminderAction,
+    ): CommandResult<Unit> = command(StableIds.occurrence(scheduleId, nominalDate)) {
+        FoundationCodec.checkId(scheduleId)
+        val id = StableIds.occurrence(scheduleId, nominalDate)
+        val scheduleRef = owned.collection(UserCollection.SCHEDULES).document(scheduleId)
+        val occurrenceRef = owned.collection(UserCollection.OCCURRENCES).document(id)
+        val receiptRef = transactions.document(StableIds.scheduledReceipt(id))
+        val replayed = firestore.runTransaction { transaction ->
+            requireSession()
+            val schedule = FoundationCodec.incomeReminderSchedule(
+                scheduleId, requireNotNull(transaction.get(scheduleRef).data) { "Reminder schedule was not found." },
+            )
+            val stored = transaction.get(occurrenceRef).data
+                ?.let { FoundationCodec.incomeReminderOccurrence(id, it) }
+            val current = stored ?: requireNotNull(
+                OccurrenceCalculator.incomeReminderOccurrences(schedule, nominalDate, nominalDate).singleOrNull(),
+            ) { "The date does not belong to this schedule." }
+
+            val receipt = if (action is IncomeReminderAction.Confirm) {
+                require(action.receivedOn.year in 1..9999 && action.receivedOn <= LocalDate.now(schedule.timeZone)) {
+                    "Use today or an earlier receipt date."
+                }
+                val requested = FoundationCodec.eventData(scheduledIncomeReceipt(schedule, current, action))
+                val existing = transaction.get(receiptRef)
+                if (existing.exists()) {
+                    val data = requireNotNull(existing.data)
+                    val replay = requested + ("clientCreatedAt" to requireNotNull(data["clientCreatedAt"]))
+                    if (current.confirmedTransactionId != receiptRef.id || !FoundationCodec.sameEvent(data, replay)) {
+                        throw conflict()
+                    }
+                    return@runTransaction true
+                }
+                requireIncomeReminderReferences(transaction, schedule)
+                requested
+            } else null
+
+            val revision = stored?.metadata?.revision
+            if (revision != expectedRevision) {
+                val alreadyApplied = when (action) {
+                    is IncomeReminderAction.Adjust -> current.state == OccurrenceState.OPEN &&
+                        current.expectedAmount == action.amount && current.effectiveDueDate == action.dueOn &&
+                        current.snoozedUntil == null
+                    is IncomeReminderAction.Snooze -> current.state == OccurrenceState.OPEN &&
+                        current.snoozedUntil == FoundationCodec.storedInstant(action.until)
+                    IncomeReminderAction.Skip -> current.state == OccurrenceState.SKIPPED
+                    IncomeReminderAction.Reopen -> current.state == OccurrenceState.OPEN &&
+                        revision != null && expectedRevision != null && revision - expectedRevision == 1L
+                    is IncomeReminderAction.Confirm -> false
+                }
+                if (alreadyApplied) return@runTransaction true
+                throw FoundationProblem(FailureCode.CONFLICT, "This reminder changed. Refresh and review it.")
+            }
+            val requiredState = if (action == IncomeReminderAction.Reopen) OccurrenceState.SKIPPED else OccurrenceState.OPEN
+            if (current.state != requiredState) {
+                throw FoundationProblem(FailureCode.CONFLICT, "This reminder can no longer be changed with that action.")
+            }
+
+            val decision = when (action) {
+                is IncomeReminderAction.Adjust -> IncomeOccurrenceTransitions.adjust(
+                    current, current.metadata.revision, action.amount, action.dueOn,
+                )
+                is IncomeReminderAction.Snooze -> IncomeOccurrenceTransitions.snooze(
+                    current, current.metadata.revision, FoundationCodec.storedInstant(action.until),
+                )
+                IncomeReminderAction.Skip -> IncomeOccurrenceTransitions.skip(current, current.metadata.revision)
+                IncomeReminderAction.Reopen -> IncomeOccurrenceTransitions.reopen(current, current.metadata.revision)
+                is IncomeReminderAction.Confirm -> IncomeOccurrenceTransitions.confirm(
+                    current, current.metadata.revision, receiptRef.id,
+                )
+            }
+            val changed = (decision as IncomeOccurrenceTransitions.Decision.Apply).occurrence
+            val next = changed.copy(
+                confirmedAmount = (action as? IncomeReminderAction.Confirm)?.amount,
+                metadata = changed.metadata.copy(revision = if (stored == null) 0L else changed.metadata.revision),
+            )
+            transaction.set(occurrenceRef, FoundationCodec.incomeReminderOccurrenceData(next))
+            if (receipt != null) transaction.set(receiptRef, receipt)
+            false
+        }.await()
+        CommandResult.Accepted(Unit, WriteState.CLOUD_CONFIRMED, replayed)
+    }
+
+    private fun requireIncomeReminderReferences(transaction: Transaction, schedule: Schedule) {
+        val accountRef = accounts.document(requireNotNull(schedule.preferredAccountId))
+        val sourceRef = owned.collection(UserCollection.INCOME_SOURCES).document(requireNotNull(schedule.incomeSourceId))
+        val account = FoundationCodec.account(
+            accountRef.id, requireNotNull(transaction.get(accountRef).data) { "Receiving account was not found." },
+        )
+        val source = FoundationCodec.incomeSource(
+            sourceRef.id, requireNotNull(transaction.get(sourceRef).data) { "Income source was not found." },
+        )
+        require(account.asset == FiatCurrency.LKR && account.metadata.archivedAt == null) {
+            "Choose an active LKR receiving account."
+        }
+        require(source.metadata.archivedAt == null && (source.defaultCurrency ?: FiatCurrency.LKR) == FiatCurrency.LKR) {
+            "Choose an active LKR income source."
+        }
     }
 
     fun observeMonthlyBills(): Flow<Observation<List<MonthlyBill>>> = observeQuery(

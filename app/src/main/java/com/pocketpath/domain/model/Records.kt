@@ -140,6 +140,7 @@ data class Occurrence(
     val commitmentClass: CommitmentClass? = null, val state: OccurrenceState = OccurrenceState.OPEN,
     val snoozedUntil: Instant? = null, val confirmedTransactionId: String? = null,
     val metadata: RecordMetadata = RecordMetadata(),
+    val confirmedAmount: EntryAmount? = null,
 ) {
     val id: String get() = StableIds.occurrence(scheduleId, nominalDate)
     init {
@@ -147,6 +148,8 @@ data class Occurrence(
         require(compatibleScheduleReferences(kind, sourceId, categoryId, commitmentClass))
         require(state != OccurrenceState.CONFIRMED || kind == ScheduleKind.INCOME_REMINDER)
         require((state == OccurrenceState.CONFIRMED) == (confirmedTransactionId != null))
+        require(confirmedAmount == null || (state == OccurrenceState.CONFIRMED &&
+            confirmedAmount.money.currency == expectedAmount.money.currency))
     }
 }
 

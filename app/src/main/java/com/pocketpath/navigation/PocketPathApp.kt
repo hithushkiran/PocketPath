@@ -52,6 +52,11 @@ import com.pocketpath.feature.goals.GoalsEvent
 import com.pocketpath.feature.goals.GoalsScreen
 import com.pocketpath.feature.goals.GoalsUiState
 import com.pocketpath.feature.home.HomeScreen
+import com.pocketpath.domain.calculation.IncomeReminderAction
+import com.pocketpath.domain.model.Occurrence
+import com.pocketpath.domain.model.Schedule
+import com.pocketpath.feature.income.IncomeRemindersScreen
+import com.pocketpath.feature.income.IncomeRemindersUiState
 import com.pocketpath.feature.income.ManualIncomeEvent
 import com.pocketpath.feature.income.ManualIncomeScreen
 import com.pocketpath.feature.income.ManualIncomeUiState
@@ -97,6 +102,10 @@ fun PocketPathApp(
     onGoalsEvent: (GoalsEvent) -> Unit = {},
     incomeState: ManualIncomeUiState = ManualIncomeUiState(),
     onIncomeEvent: (ManualIncomeEvent) -> Unit = {},
+    incomeRemindersState: IncomeRemindersUiState = IncomeRemindersUiState(),
+    onSaveIncomeReminder: (Schedule) -> Unit = {},
+    onIncomeReminderAction: (Occurrence, IncomeReminderAction) -> Unit = { _, _ -> },
+    onRetryIncomeReminder: () -> Unit = {},
     expectedPaymentsState: ExpectedPaymentsUiState = ExpectedPaymentsUiState(),
     onExpectedPaymentCancel: (ExpectedPayment) -> Unit = {},
     onExpectedPaymentReceiptAction: (com.pocketpath.feature.income.ReceiptAction) -> Unit = {},
@@ -116,6 +125,7 @@ fun PocketPathApp(
         destination.matches(CryptoWallets::class) -> R.string.nav_crypto
         destination.matches(RecordIncome::class) -> R.string.nav_record_income
         destination.matches(IncomeSources::class) -> R.string.nav_income_sources
+        destination.matches(IncomeReminders::class) -> R.string.nav_income_reminders
         destination.matches(ExpectedPayments::class) -> R.string.nav_expected_payments
         destination.matches(CreateExpectedPayment::class) -> R.string.nav_create_expected_payment
         destination.matches(Settings::class) -> R.string.nav_settings
@@ -258,6 +268,7 @@ fun PocketPathApp(
                     onRecordIncome = { navController.navigate(RecordIncome) { launchSingleTop = true } },
                     onManageIncomeSources = { navController.navigate(IncomeSources) { launchSingleTop = true } },
                     onExpectedPayments = { navController.navigate(ExpectedPayments) { launchSingleTop = true } },
+                    onIncomeReminders = { navController.navigate(IncomeReminders) { launchSingleTop = true } },
                 )
             }
             composable<CryptoWallets> {
@@ -265,6 +276,17 @@ fun PocketPathApp(
             }
             composable<RecordIncome> {
                 ManualIncomeScreen(state = incomeState, onEvent = onIncomeEvent)
+            }
+            composable<IncomeReminders> {
+                IncomeRemindersScreen(
+                    state = incomeRemindersState,
+                    income = incomeState,
+                    finance = financeState,
+                    onFinanceEvent = onFinanceEvent,
+                    onSave = onSaveIncomeReminder,
+                    onAct = onIncomeReminderAction,
+                    onRetry = onRetryIncomeReminder,
+                )
             }
             composable<IncomeSources> {
                 IncomeSourcesScreen(state = incomeState, onEvent = onIncomeEvent)

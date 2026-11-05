@@ -788,3 +788,120 @@ test('crypto allocation rounds an exact half minor unit upward', async () => {
     cryptoPosition('rounded', sold, 49_999_999_999, 2),
   ));
 });
+
+const reminderRef = (id = 'salary', client = db) => doc(client, root, 'schedules', id);
+const reminderOccurrenceRef = (id, client = db) => doc(client, root, 'occurrences', id);
+
+function incomeReminder(frequency = 'MONTHLY', anchorDate = date) {
+  return {
+    kind: 'INCOME_REMINDER', title: 'Salary', frequency, interval: 1, anchorDate, activeFrom: anchorDate,
+    timeZone: 'Asia/Colombo', expectedAmountMinor: 12_000_000, currencyCode: 'LKR', amountMode: 'ESTIMATE',
+    incomeSourceId: 'source', preferredAccountId: 'bank', paused: false, reminderLeadDays: 0,
+    createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0,
+  };
+}
+
+function reminderOccurrence(nominalDate = date, scheduleId = 'salary') {
+  return {
+    scheduleId, nominalDate, effectiveDueDate: nominalDate, kind: 'INCOME_REMINDER', titleSnapshot: 'Salary',
+    expectedAmountMinor: 12_000_000, currencyCode: 'LKR', timeZone: 'Asia/Colombo', sourceId: 'source',
+    state: 'OPEN', createdAt: serverTimestamp(), updatedAt: serverTimestamp(), revision: 0,
+  };
+}
+
+function scheduledIncome(id, amount = 13_500_000, accountId = 'bank') {
+  const receiptId = `receipt_${id}`;
+  return { ...event(receiptId, 'INCOME', amount, accountId), occurrenceId: id };
+}
+
+test('recurring income creates a deterministic receipt and occurrence together on first confirmation', async () => {
+  const id = `salary_${date}`;
+  const receipt = scheduledIncome(id);
+  const confirmed = {
+    ...reminderOccurrence(), state: 'CONFIRMED', confirmedTransactionId: receipt.operationId,
+    confirmedAmountMinor: 13_500_000,
+  };
+  await assertSucceeds(setDoc(reminderRef(), incomeReminder()));
+  await assertFails(setDoc(eventRef(receipt.operationId), receipt));
+  await assertFails(setDoc(reminderOccurrenceRef(id), confirmed));
+  const batch = writeBatch(db);
+  batch.set(eventRef(receipt.operationId), receipt);
+  batch.set(reminderOccurrenceRef(id), confirmed);
+  await assertSucceeds(batch.commit());
+  const saved = (await getDoc(reminderOccurrenceRef(id))).data();
+  assert.equal(saved.state, 'CONFIRMED');
+  assert.equal(saved.expectedAmountMinor, 12_000_000);
+  assert.equal(saved.confirmedAmountMinor, 13_500_000);
+  assert.equal((await getDoc(eventRef(receipt.operationId))).data().movements[0].amountMinor, 13_500_000);
+  await assertFails(setDoc(eventRef(receipt.operationId), receipt));
+});
+
+test('recurring income adjustment and snooze do not post money and an adjusted prompt can be confirmed', async () => {
+  const id = `salary_${date}`;
+  const ref = reminderOccurrenceRef(id);
+  const receipt = scheduledIncome(id, 12_900_000);
+  await assertSucceeds(setDoc(reminderRef(), incomeReminder('WEEKLY')));
+  await assertSucceeds(setDoc(ref, {
+    ...reminderOccurrence(), expectedAmountMinor: 12_900_000, effectiveDueDate: '2026-11-06',
+  }));
+  await assertSucceeds(updateDoc(ref, {
+    snoozedUntil: Timestamp.fromMillis(Date.now() + 86_400_000), updatedAt: serverTimestamp(), revision: 1,
+  }));
+  assert.equal((await getDoc(eventRef(receipt.operationId))).exists(), false);
+  const patch = {
+    state: 'CONFIRMED', confirmedTransactionId: receipt.operationId, confirmedAmountMinor: 12_900_000,
+    snoozedUntil: deleteField(), updatedAt: serverTimestamp(), revision: 2,
+  };
+  await assertFails(updateDoc(ref, patch));
+  const batch = writeBatch(db);
+  batch.set(eventRef(receipt.operationId), receipt);
+  batch.update(ref, patch);
+  await assertSucceeds(batch.commit());
+  const data = (await getDoc(ref)).data();
+  assert.equal(data.revision, 2);
+  assert.equal(data.effectiveDueDate, '2026-11-06');
+  assert.equal('snoozedUntil' in data, false);
+});
+
+test('recurring income clamps yearly dates, validates weekly dates and preserves future prompts after skip', async () => {
+  await assertSucceeds(setDoc(reminderRef('annual'), incomeReminder('YEARLY', '2024-02-29')));
+  await assertSucceeds(setDoc(reminderOccurrenceRef('annual_2025-02-28'), {
+    ...reminderOccurrence('2025-02-28', 'annual'), state: 'SKIPPED',
+  }));
+  await assertFails(setDoc(reminderOccurrenceRef('annual_2026-03-29'), reminderOccurrence('2026-03-29', 'annual')));
+  await assertSucceeds(setDoc(reminderOccurrenceRef('annual_2026-02-28'), reminderOccurrence('2026-02-28', 'annual')));
+  await assertSucceeds(setDoc(reminderRef('weekly'), incomeReminder('WEEKLY')));
+  await assertFails(setDoc(reminderOccurrenceRef('weekly_2026-11-13'), reminderOccurrence('2026-11-13', 'weekly')));
+  await assertSucceeds(setDoc(reminderOccurrenceRef('weekly_2026-11-12'), reminderOccurrence('2026-11-12', 'weekly')));
+  assert.equal((await getDoc(eventRef('receipt_annual_2025-02-28'))).exists(), false);
+  const skipped = reminderOccurrenceRef('annual_2025-02-28');
+  await assertFails(updateDoc(skipped, {
+    state: 'OPEN', expectedAmountMinor: 99, updatedAt: serverTimestamp(), revision: 1,
+  }));
+  await assertSucceeds(updateDoc(skipped, { state: 'OPEN', updatedAt: serverTimestamp(), revision: 1 }));
+  assert.equal((await getDoc(skipped)).data().state, 'OPEN');
+});
+
+test('recurring income rejects a cross-user schedule, stale revision, forged amount and competing links', async () => {
+  const id = `salary_${date}`;
+  const other = environment.authenticatedContext('other').firestore();
+  await assertFails(setDoc(reminderRef('salary', other), incomeReminder()));
+  await assertFails(setDoc(reminderRef(), { ...incomeReminder(), preferredAccountId: 'missing' }));
+  await assertSucceeds(setDoc(reminderRef(), incomeReminder()));
+  await assertSucceeds(setDoc(reminderOccurrenceRef(id), reminderOccurrence()));
+  await assertFails(updateDoc(reminderOccurrenceRef(id), {
+    expectedAmountMinor: 99, updatedAt: serverTimestamp(), revision: 0,
+  }));
+  for (const [amount, extra] of [[1, {}], [12_000_000, { expectedPaymentId: 'payment' }]]) {
+    const receipt = scheduledIncome(id, amount);
+    const batch = writeBatch(db);
+    batch.set(eventRef(receipt.operationId), { ...receipt, ...extra });
+    batch.update(reminderOccurrenceRef(id), {
+      state: 'CONFIRMED', confirmedTransactionId: receipt.operationId, confirmedAmountMinor: 12_000_000,
+      updatedAt: serverTimestamp(), revision: 1,
+    });
+    await assertFails(batch.commit());
+  }
+  assert.equal((await getDoc(reminderOccurrenceRef(id))).data().state, 'OPEN');
+  assert.equal((await getDoc(eventRef(`receipt_${id}`))).exists(), false);
+});
