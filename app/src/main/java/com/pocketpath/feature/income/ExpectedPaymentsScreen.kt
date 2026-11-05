@@ -37,11 +37,10 @@ fun ExpectedPaymentsScreen(
     state: ExpectedPaymentsUiState,
     onCreate: () -> Unit,
     onCancel: (ExpectedPayment) -> Unit,
-    onRecordReceipt: (ExpectedPayment, String?, String) -> Unit = { _, _, _ -> },
+    onReceiptAction: (ReceiptAction) -> Unit = {},
     onSelectReceivingAccount: (String?) -> Unit = {},
 ) {
     var cancelling by remember { mutableStateOf<ExpectedPayment?>(null) }
-    var receiving by remember { mutableStateOf<ExpectedPayment?>(null) }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -71,6 +70,8 @@ fun ExpectedPaymentsScreen(
         state.receiptMessage?.let { Text(it, color = MaterialTheme.colorScheme.primary) }
         state.ledgerError?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
 
+        ReceiptRecoveryCard(state, onReceiptAction, onSelectReceivingAccount)
+
         if (state.isEmpty) {
             Text("No active expected payments.")
         }
@@ -82,7 +83,7 @@ fun ExpectedPaymentsScreen(
                 recordingReceipt = state.recordingReceiptPaymentId == payment.id,
                 canRecordReceipt = state.canRecordReceipts,
                 onCancel = { cancelling = payment },
-                onReceipt = { receiving = payment },
+                onReceipt = { onReceiptAction(ReceiptAction.Begin(payment.id)) },
             )
         }
     }
@@ -96,22 +97,6 @@ fun ExpectedPaymentsScreen(
             },
             dismissButton = {
                 TextButton(onClick = { cancelling = null }) { Text("Keep payment") }
-            },
-        )
-    }
-    receiving?.let { payment ->
-        ReceiptDialog(
-            payment = payment,
-            accounts = state.accounts,
-            selectedAccountId = state.selectedReceivingAccountId,
-            accountsLoading = state.accountsLoading,
-            accountsError = state.accountsError,
-            busy = state.recordingReceiptPaymentId == payment.id,
-            onSelectAccount = onSelectReceivingAccount,
-            onDismiss = { receiving = null },
-            onSave = { account, amount ->
-                receiving = null
-                onRecordReceipt(payment, account, amount)
             },
         )
     }
@@ -160,56 +145,96 @@ private fun ExpectedPaymentCard(
 }
 
 @Composable
-private fun ReceiptDialog(
-    payment: ExpectedPayment,
-    accounts: List<Account>,
-    selectedAccountId: String?,
-    accountsLoading: Boolean,
-    accountsError: com.pocketpath.domain.repository.RepositoryFailure?,
-    busy: Boolean,
+private fun ReceiptRecoveryCard(
+    state: ExpectedPaymentsUiState,
+    onAction: (ReceiptAction) -> Unit,
     onSelectAccount: (String?) -> Unit,
-    onDismiss: () -> Unit,
-    onSave: (String?, String) -> Unit,
 ) {
-    var amount by remember(payment.id) { mutableStateOf("") }
-    val receivingAccounts = accounts.filter(::isActiveLkrAccount)
-    val selectedAccountIsValid = receivingAccounts.any { it.id == selectedAccountId }
-    AlertDialog(
-        onDismissRequest = { if (!busy) onDismiss() },
-        title = { Text("Record receipt") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("Remaining LKR ${Money.lkr(payment.amountDue.money.minor - payment.receivedAmountMinor).major().toPlainString()}")
-                if (accountsLoading) {
-                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-                    Text("Loading receiving accounts…")
-                }
-                accountsError?.let { Text(it.message, color = MaterialTheme.colorScheme.error) }
-                receivingAccounts.forEach { item ->
-                    OutlinedButton(
-                        onClick = { onSelectAccount(item.id) },
-                        enabled = !busy,
-                    ) { Text(if (selectedAccountId == item.id) "Receiving: ${item.name}" else item.name) }
-                }
-                if (!accountsLoading && accountsError == null && receivingAccounts.isEmpty()) {
-                    Text("No active LKR receiving accounts. Create an account first.")
+    val recovery = state.receiptRecovery
+    if (recovery.restoring) {
+        Text("Restoring receipt recovery...")
+        return
+    }
+    if (recovery.error != null) {
+        Text(recovery.error, color = MaterialTheme.colorScheme.error,
+            modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite })
+    }
+    val receipt = recovery.receipt
+    if (receipt == null) {
+        if (recovery.storageBlocked) {
+            Text("Receipt storage could not be read. New receipts are blocked; no submission has been started.")
+            TextButton(onClick = { onAction(ReceiptAction.Reload) }) { Text("Reload recovery storage") }
+        }
+        return
+    }
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Receipt: ${receipt.projectLabel}", style = MaterialTheme.typography.titleMedium)
+            if (receipt.phase == com.pocketpath.data.local.ReceiptRecoveryPhase.DRAFT) {
+                Text("Unsubmitted draft. Cancelling this draft cannot cancel a submitted operation.")
+                Text("Receiving account: ${receipt.accountId ?: "Select an account"}")
+                state.accounts.filter(::isActiveLkrAccount).forEach { account ->
+                    OutlinedButton(onClick = { onSelectAccount(account.id) }, enabled = !recovery.busy && !recovery.storageBlocked) {
+                        Text(if (account.id == receipt.accountId) "Receiving: ${account.name}" else account.name)
+                    }
                 }
                 OutlinedTextField(
-                    value = amount,
-                    onValueChange = { amount = it },
-                    enabled = !busy,
+                    value = receipt.amountText,
+                    onValueChange = { onAction(ReceiptAction.Amount(it)) },
+                    enabled = !recovery.busy && !recovery.storageBlocked,
                     label = { Text("LKR receipt amount") },
                 )
+                TextButton(onClick = { onAction(ReceiptAction.Submit) }, enabled = !recovery.busy && !recovery.storageBlocked) {
+                    Text("Save receipt")
+                }
+                TextButton(onClick = { onAction(ReceiptAction.CancelDraft) }, enabled = !recovery.busy && !recovery.storageBlocked) {
+                    Text("Cancel unsubmitted draft")
+                }
+                if (recovery.storageBlocked) {
+                    TextButton(onClick = { onAction(ReceiptAction.Reload) }) { Text("Reload recovery storage") }
+                }
+            } else {
+                val command = requireNotNull(receipt.command)
+                Text("Review retained receipt")
+                Text("Operation: ${command.operationId}")
+                Text("Payment: ${command.paymentId}; original revision: ${command.originalRevision}")
+                Text("Income source: ${command.sourceId}")
+                Text("Receiving account: ${command.accountId}")
+                Text("Amount: LKR ${Money.lkr(command.amountMinor).major().toPlainString()}")
+                Text("Financial time: ${command.occurredAt}; ${command.localDate}; ${command.zone}")
+                Text("Client time: ${command.clientCreatedAt}")
+                val resolution = receipt.resolution
+                (resolution?.serverOperation ?: recovery.reviewedOperation)?.let {
+                    Text("Server operation from review:")
+                    Text(it)
+                }
+                (resolution?.serverPayment ?: recovery.reviewedPayment)?.let {
+                    Text("Payment state from review:")
+                    Text(it)
+                }
+                if ((receipt.phase == com.pocketpath.data.local.ReceiptRecoveryPhase.CONFIRMED ||
+                        receipt.phase == com.pocketpath.data.local.ReceiptRecoveryPhase.RESOLVED) && !recovery.storageBlocked) {
+                    Text(resolution?.reason ?: if (receipt.replayed) "Confirmed: receipt was already recorded." else "Receipt confirmed.")
+                    resolution?.let { Text("Inspected at: ${it.inspectedAt}") }
+                    Text("Acknowledge this durably saved outcome before separately starting another receipt.")
+                    TextButton(onClick = { onAction(ReceiptAction.Acknowledge) }, enabled = !recovery.busy) {
+                        Text(if (receipt.phase == com.pocketpath.data.local.ReceiptRecoveryPhase.CONFIRMED)
+                            "Acknowledge confirmed receipt" else "Acknowledge resolved conflict (not a saved receipt)")
+                    }
+                } else {
+                    Text("This operation may already be recorded. A conflict requires review of these details; " +
+                        "it never starts a new receipt. Retry uses the same ID, revision and payload. " +
+                        "Leaving this screen or signing out retains recovery for this account.")
+                    TextButton(onClick = { onAction(ReceiptAction.Retry) }, enabled = !recovery.busy) {
+                        Text(if (recovery.busy) "Saving..." else if (receipt.phase != com.pocketpath.data.local.ReceiptRecoveryPhase.PREPARED) "Retry saving outcome" else "Retry retained receipt")
+                    }
+                    TextButton(onClick = { onAction(ReceiptAction.Review) }, enabled = !recovery.busy) {
+                        Text("Review server outcome (read only)")
+                    }
+                }
             }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onSave(selectedAccountId, amount) },
-                enabled = !busy && selectedAccountIsValid && !accountsLoading && accountsError == null,
-            ) { Text(if (busy) "Saving…" else "Save receipt") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !busy) { Text("Cancel") } },
-    )
+        }
+    }
 }
 
 internal fun expectedPaymentStatusText(payment: ExpectedPayment): String = when (payment.state) {

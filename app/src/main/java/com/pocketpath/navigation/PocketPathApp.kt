@@ -94,7 +94,7 @@ fun PocketPathApp(
     onIncomeEvent: (ManualIncomeEvent) -> Unit = {},
     expectedPaymentsState: ExpectedPaymentsUiState = ExpectedPaymentsUiState(),
     onExpectedPaymentCancel: (ExpectedPayment) -> Unit = {},
-    onExpectedPaymentReceipt: (ExpectedPayment, String?, String) -> Unit = { _, _, _ -> },
+    onExpectedPaymentReceiptAction: (com.pocketpath.feature.income.ReceiptAction) -> Unit = {},
     onExpectedPaymentReceivingAccountSelected: (String?) -> Unit = {},
     expectedPaymentCreationState: ExpectedPaymentCreationUiState = ExpectedPaymentCreationUiState(loading = false),
     onExpectedPaymentCreationEvent: (ExpectedPaymentCreationEvent) -> Unit = {},
@@ -249,7 +249,7 @@ fun PocketPathApp(
                     state = expectedPaymentsState,
                     onCreate = { navController.navigate(CreateExpectedPayment) { launchSingleTop = true } },
                     onCancel = onExpectedPaymentCancel,
-                    onRecordReceipt = onExpectedPaymentReceipt,
+                    onReceiptAction = onExpectedPaymentReceiptAction,
                     onSelectReceivingAccount = onExpectedPaymentReceivingAccountSelected,
                 )
             }

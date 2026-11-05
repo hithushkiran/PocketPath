@@ -513,18 +513,9 @@ internal object FoundationCodec {
             expected.filterKeys { it in creationFields }
     }
 
+    /** Only the server audit timestamp is outside retained receipt command identity. */
     fun sameExpectedPaymentReceipt(actual: FirestoreFields, expected: FirestoreFields): Boolean =
-        actual.filterKeys {
-            it !in setOf(
-                "createdAt", "occurredAt", "occurredLocalDate",
-                "recordedTimeZone", "clientCreatedAt",
-            )
-        } == expected.filterKeys {
-            it !in setOf(
-                "createdAt", "occurredAt", "occurredLocalDate",
-                "recordedTimeZone", "clientCreatedAt",
-            )
-        }
+        actual.filterKeys { it != "createdAt" } == expected.filterKeys { it != "createdAt" }
 
     private fun expectedPaymentCurrency(code: String): FiatCurrency {
         val currency = FiatCurrency(code)

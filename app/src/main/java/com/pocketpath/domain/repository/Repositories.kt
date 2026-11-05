@@ -71,6 +71,8 @@ interface IncomeRepository : UserOwnedRepository {
     suspend fun saveExpectedPayment(operationId: String, payment: ExpectedPayment): CommandResult<ExpectedPayment>
     suspend fun cancelExpectedPayment(operationId: String, paymentId: String, expectedRevision: Long): CommandResult<ExpectedPayment>
     suspend fun recordExpectedPaymentReceipt(event: FinancialTransaction, expectedRevision: Long): CommandResult<FinancialTransaction>
+    /** Online read-only consistent snapshot; absence from cache is not a resolution. */
+    suspend fun inspectExpectedPaymentReceipt(operationId: String, paymentId: String): ReceiptInspection
     suspend fun recordIncome(event: FinancialTransaction): CommandResult<FinancialTransaction>
 }
 interface ScheduleRepository : UserOwnedRepository {

@@ -95,14 +95,13 @@ fun AuthRoot(
                     onSignOut = {
                         if (visibleFinance.hasUnresolvedLocalWork || visibleIncome.hasUnresolvedIncomeWork ||
                             visibleIncome.hasUnresolvedSourceWork ||
-                            visibleExpectedPayments.hasUnresolvedCancellationRetry
+                            visibleExpectedPayments.hasUnresolvedCancellationRetry || visibleExpectedPayments.receiptRecovery.hasWork
                         ) {
                             confirmSignOut = true
                         } else {
-                            financeViewModel.flushAndSignOut(
-                                current.user.uid,
-                                viewModel::signOut,
-                            )
+                            expectedPaymentsViewModel.flushReceiptAndContinue(current.user.uid) {
+                                financeViewModel.flushAndSignOut(current.user.uid, viewModel::signOut)
+                            }
                         }
                     },
                     financeState = visibleFinance,
@@ -115,8 +114,8 @@ fun AuthRoot(
                     onExpectedPaymentCancel = {
                         expectedPaymentsViewModel.cancel(current.user.uid, it)
                     },
-                    onExpectedPaymentReceipt = { payment, accountId, amount ->
-                        expectedPaymentsViewModel.recordReceipt(current.user.uid, payment, accountId, amount)
+                    onExpectedPaymentReceiptAction = {
+                        expectedPaymentsViewModel.onReceiptAction(current.user.uid, it)
                     },
                     onExpectedPaymentReceivingAccountSelected = { accountId ->
                         expectedPaymentsViewModel.selectReceivingAccount(current.user.uid, accountId)
@@ -124,6 +123,29 @@ fun AuthRoot(
                     expectedPaymentCreationState = visibleExpectedPaymentCreation,
                     onExpectedPaymentCreationEvent = { expectedPaymentCreationViewModel.onEvent(current.user.uid, it) },
                 )
+
+                visibleExpectedPayments.receiptSignOut.failure?.let { failure ->
+                    AlertDialog(
+                        onDismissRequest = { expectedPaymentsViewModel.stayAfterReceiptStorageFailure(current.user.uid) },
+                        title = { Text("Receipt storage could not be saved") },
+                        text = {
+                            Text(failure + "\n\nUnsaved in-memory receipt changes may be lost. A receipt may already have posted. " +
+                                "Signing out despite this failure does not promise persistence or cancel a receipt. " +
+                                "Existing recovery bytes will be left unchanged by the override. Other income retry warnings still apply.")
+                        },
+                        confirmButton = {
+                            TextButton(onClick = { expectedPaymentsViewModel.signOutDespiteReceiptStorageFailure(current.user.uid) }) {
+                                Text("Sign out despite receipt-storage failure")
+                            }
+                        },
+                        dismissButton = {
+                            Column {
+                                TextButton(onClick = { expectedPaymentsViewModel.retryReceiptSignOut(current.user.uid) }) { Text("Retry receipt persistence") }
+                                TextButton(onClick = { expectedPaymentsViewModel.stayAfterReceiptStorageFailure(current.user.uid) }) { Text("Stay signed in") }
+                            }
+                        },
+                    )
+                }
 
                 if (confirmSignOut) {
                     AlertDialog(
@@ -154,6 +176,11 @@ fun AuthRoot(
                                         "the source may already have been created.",
                                     )
                                 }
+                                if (visibleExpectedPayments.receiptRecovery.hasWork) {
+                                    if (isNotEmpty()) append("\n\n")
+                                    append("Receipt drafts and retained operations remain on this device for this account. " +
+                                        "Sign back in to review or explicitly retry them. Signing out does not cancel a receipt.")
+                                }
                                 if (visibleExpectedPayments.hasUnresolvedCancellationRetry) {
                                     if (isNotEmpty()) append("\n\n")
                                     append(
@@ -167,10 +194,9 @@ fun AuthRoot(
                             TextButton(
                                 onClick = {
                                     confirmSignOut = false
-                                    financeViewModel.flushAndSignOut(
-                                        current.user.uid,
-                                        viewModel::signOut,
-                                    )
+                                    expectedPaymentsViewModel.flushReceiptAndContinue(current.user.uid) {
+                                        financeViewModel.flushAndSignOut(current.user.uid, viewModel::signOut)
+                                    }
                                 },
                             ) {
                                 Text("Sign out")

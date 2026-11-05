@@ -52,11 +52,13 @@ data class ExpectedPaymentsUiState(
     val receiptError: RepositoryFailure? = null,
     val hasUnresolvedReceiptRetry: Boolean = false,
     val receiptMessage: String? = null,
+    val receiptRecovery: ReceiptRecoveryState = ReceiptRecoveryState(),
+    val receiptSignOut: ReceiptSignOutState = ReceiptSignOutState(),
 ) {
     val isEmpty: Boolean get() = !loading && error == null && ledgerError == null && payments.isEmpty()
     val isPopulated: Boolean get() = !loading && payments.isNotEmpty()
     val canRecordReceipts: Boolean
-        get() = !loading && !ledgerLoading && ledgerError == null &&
+        get() = !receiptRecovery.hasWork && !loading && !ledgerLoading && ledgerError == null &&
             !accountsLoading && accountsError == null && accounts.any(::isActiveLkrAccount)
 }
 
@@ -76,15 +78,17 @@ internal object ExpectedPaymentReceiptFactory {
         }
         val account = requireNotNull(accountId) { "Select a receiving account." }
         require(payment.state == com.pocketpath.domain.model.ExpectedPaymentState.ACTIVE)
+        require(payment.amountDue.money.currency == FiatCurrency.LKR) { "Receipts currently require an LKR expected payment." }
         require(accounts.any { it.id == account && isActiveLkrAccount(it) })
         val amount = Money.parse(amountText.trim(), FiatCurrency.LKR)
         require(amount.minor > 0 && amount.minor <= payment.amountDue.money.minor - payment.receivedAmountMinor) {
             "Receipt exceeds the remaining expected amount."
         }
-        val date = now.atZone(zone).toLocalDate()
+        val canonicalNow = com.pocketpath.data.firebase.FoundationCodec.storedInstant(now)
+        val date = canonicalNow.atZone(zone).toLocalDate()
         return FinancialTransaction(
             operationId = operationId, kind = TransactionKind.INCOME, status = TransactionStatus.POSTED,
-            financialTime = FinancialTime(now, date, zone), clientCreatedAt = now,
+            financialTime = FinancialTime(canonicalNow, date, zone), clientCreatedAt = canonicalNow,
             movements = listOf(AccountMovement(account, NativeAmount.Fiat(amount))),
             components = listOf(ReportComponent(ComponentNature.EARNING, KnownLkrAmount.Known(amount), incomeSourceId = payment.incomeSourceId)),
             expectedPaymentId = payment.id,
@@ -113,6 +117,7 @@ internal object ExpectedPaymentsSessionState {
     }
 
     fun selectReceivingAccount(state: ExpectedPaymentsUiState, accountId: String?): ExpectedPaymentsUiState {
+        if (state.receiptRecovery.receipt?.command != null) return state
         val selected = state.accounts.firstOrNull { it.id == accountId && isActiveLkrAccount(it) }?.id
         return state.copy(selectedReceivingAccountId = selected)
     }
@@ -146,6 +151,8 @@ internal object ExpectedPaymentsSessionState {
         receiptError = current.receiptError,
         hasUnresolvedReceiptRetry = current.hasUnresolvedReceiptRetry,
         receiptMessage = current.receiptMessage,
+        receiptRecovery = current.receiptRecovery,
+        receiptSignOut = current.receiptSignOut,
     )
 
     private fun ExpectedPaymentsUiState.withReceivingAccounts(
@@ -154,14 +161,14 @@ internal object ExpectedPaymentsSessionState {
         error: RepositoryFailure?,
     ): ExpectedPaymentsUiState {
         val activeAccounts = accounts
-        val selected = selectedReceivingAccountId
+        val selected = receiptRecovery.receipt?.accountId ?: selectedReceivingAccountId
             ?.takeIf { id -> activeAccounts.any { it.id == id && isActiveLkrAccount(it) } }
             ?: activeAccounts.firstOrNull(::isActiveLkrAccount)?.id
         return copy(
             accounts = activeAccounts,
             accountsLoading = loading,
             accountsError = error,
-            selectedReceivingAccountId = selected,
+            selectedReceivingAccountId = if (receiptRecovery.receipt?.command != null) receiptRecovery.receipt.accountId else selected,
         )
     }
 }

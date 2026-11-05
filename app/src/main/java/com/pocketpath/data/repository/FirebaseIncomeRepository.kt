@@ -427,8 +427,42 @@ class FirebaseIncomeRepository internal constructor(
             }
         }.await()
         CommandResult.Accepted(result.event, WriteState.CLOUD_CONFIRMED, result.replayed)
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
     } catch (error: Exception) {
         CommandResult.Rejected(error.failure(event.id))
+    }
+
+    override suspend fun inspectExpectedPaymentReceipt(
+        operationId: String,
+        paymentId: String,
+    ): com.pocketpath.domain.repository.ReceiptInspection = try {
+        requireSession()
+        FoundationCodec.checkId(operationId)
+        FoundationCodec.checkId(paymentId)
+        val result = firestore.runTransaction { transaction ->
+            requireSession()
+            // Firestore transactions are online and these reads share one consistent snapshot.
+            // No transaction.set/update/delete is issued by inspection.
+            val operation = transaction.get(transactions.document(operationId))
+            val payment = transaction.get(expectedPayments.document(paymentId))
+            requireSession()
+            require(!operation.metadata.isFromCache && !payment.metadata.isFromCache &&
+                !operation.metadata.hasPendingWrites() && !payment.metadata.hasPendingWrites()) {
+                "Authoritative receipt inspection is unavailable."
+            }
+            com.pocketpath.domain.repository.ReceiptInspection.Authoritative(
+                owner = userId, operationId = operationId, paymentId = paymentId,
+                operation = if (operation.exists()) FoundationCodec.event(operationId, requireNotNull(operation.data)) else null,
+                payment = if (payment.exists()) FoundationCodec.expectedPayment(paymentId, requireNotNull(payment.data)) else null,
+            )
+        }.await()
+        requireSession()
+        result
+    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+        throw cancelled
+    } catch (error: Exception) {
+        com.pocketpath.domain.repository.ReceiptInspection.Unavailable(error.failure(operationId))
     }
 
     private fun requireManualLkrIncome(event: FinancialTransaction) {
