@@ -150,6 +150,12 @@ data class Occurrence(
     }
 }
 
+/** Outstanding amount for a fixed bill, backed by its effective linked expenses. */
+data class MonthlyBill(val occurrence: Occurrence, val paidMinor: Long) {
+    init { require(paidMinor in 0..occurrence.expectedAmount.money.minor) }
+    val remainingMinor: Long get() = occurrence.expectedAmount.money.minor - paidMinor
+}
+
 object StableIds {
     private fun checked(id: String): String {
         require(id.isNotBlank() && '/' !in id)

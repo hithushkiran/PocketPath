@@ -342,7 +342,10 @@ internal object FoundationCodec {
         require(event.voidMetadata == null)
         require(event.movements.size == 1)
         require(event.reservationEffects.isEmpty() && event.valuations.isEmpty())
-        require(event.occurrenceId == null)
+        event.occurrenceId?.let {
+            checkId(it)
+            require(event.kind == TransactionKind.EXPENSE)
+        }
         require(event.originalTransactionId == null && event.goalPlanId == null)
         require(event.cryptoTrade == null)
         require(event.merchantLabel == null || event.merchantLabel.length <= 1000)
@@ -408,6 +411,7 @@ internal object FoundationCodec {
             put("components", componentData)
             put("reservationEffects", emptyList<Any>())
             put("valuations", emptyList<Any>())
+            event.occurrenceId?.let { put("occurrenceId", it) }
             event.expectedPaymentId?.let { put("expectedPaymentId", it) }
             event.note?.let { put("note", it) }
             event.merchantLabel?.let { put("merchantLabel", it) }
@@ -430,7 +434,7 @@ internal object FoundationCodec {
         pending: Boolean = false,
     ): FinancialTransaction {
         checkId(id)
-        data.checkKeys(eventRequired, setOf("note", "merchantLabel", "expectedPaymentId", "voidMetadata", "updatedAt", "replacesTransactionId"))
+        data.checkKeys(eventRequired, setOf("note", "merchantLabel", "occurrenceId", "expectedPaymentId", "voidMetadata", "updatedAt", "replacesTransactionId"))
         require(data.text("operationId") == id)
         require(data.integer("schemaVersion") == 1L)
         val revision = data.integer("revision")
@@ -501,6 +505,9 @@ internal object FoundationCodec {
             clientCreatedAt = data.instant("clientCreatedAt"),
             movements = movements,
             components = components,
+            occurrenceId = data.optionalText("occurrenceId")?.also(::checkId)?.also {
+                require(kind == TransactionKind.EXPENSE)
+            },
             expectedPaymentId = data.optionalText("expectedPaymentId")?.also(::checkId),
             note = data.optionalText("note"),
             merchantLabel = data.optionalText("merchantLabel"),
@@ -578,29 +585,61 @@ internal object FoundationCodec {
             "paused" to false,
             "reminderLeadDays" to 0L,
         )
-        val occurrenceData = shared + mapOf(
-            "scheduleId" to schedule.id,
-            "nominalDate" to date.toString(),
-            "effectiveDueDate" to date.toString(),
-            "titleSnapshot" to schedule.title,
-            "state" to OccurrenceState.OPEN.name,
-        )
-        return scheduleData to occurrenceData
+        return scheduleData to monthlyBillOccurrenceData(Occurrence(
+            scheduleId = schedule.id,
+            nominalDate = date,
+            effectiveDueDate = date,
+            kind = ScheduleKind.COMMITMENT,
+            titleSnapshot = schedule.title,
+            expectedAmount = schedule.expectedAmount,
+            timeZone = schedule.timeZone,
+            categoryId = categoryId,
+            commitmentClass = CommitmentClass.COMMITTED,
+        ))
     }
 
-    fun firstMonthlyBill(id: String, data: FirestoreFields): Occurrence {
+    fun monthlyBillOccurrenceData(bill: Occurrence): Map<String, Any> = mapOf(
+        "scheduleId" to bill.scheduleId,
+        "nominalDate" to bill.nominalDate.toString(),
+        "effectiveDueDate" to bill.effectiveDueDate.toString(),
+        "kind" to bill.kind.name,
+        "titleSnapshot" to bill.titleSnapshot,
+        "expectedAmountMinor" to bill.expectedAmount.money.minor,
+        "currencyCode" to FiatCurrency.LKR.code,
+        "timeZone" to bill.timeZone.id,
+        "categoryId" to requireNotNull(bill.categoryId),
+        "commitmentClass" to CommitmentClass.COMMITTED.name,
+        "state" to OccurrenceState.OPEN.name,
+        "createdAt" to FieldValue.serverTimestamp(),
+        "updatedAt" to FieldValue.serverTimestamp(),
+        "revision" to 0L,
+    )
+
+    fun monthlyBill(id: String, data: FirestoreFields): MonthlyBill = MonthlyBill(
+        billOccurrence(id, data),
+        if ("paidAmountMinor" in data) data.integer("paidAmountMinor") else 0L,
+    )
+
+    private fun billOccurrence(id: String, data: FirestoreFields): Occurrence {
         data.checkKeys(setOf(
             "scheduleId", "nominalDate", "effectiveDueDate", "kind", "titleSnapshot",
             "expectedAmountMinor", "currencyCode", "timeZone", "categoryId", "commitmentClass",
             "state", "createdAt", "updatedAt", "revision",
-        ))
+        ), setOf("paidAmountMinor", "lastBillExpenseId"))
         val scheduleId = data.text("scheduleId").also(::checkId)
         val nominal = LocalDate.parse(data.text("nominalDate"))
         require(id == StableIds.occurrence(scheduleId, nominal))
         require(nominal.year in 0..9999 && data.text("effectiveDueDate") == nominal.toString())
         require(data.text("kind") == ScheduleKind.COMMITMENT.name && data.text("state") == OccurrenceState.OPEN.name)
         require(data.text("currencyCode") == FiatCurrency.LKR.code && data.text("timeZone") == "Asia/Colombo")
-        require(data.text("commitmentClass") == CommitmentClass.COMMITTED.name && data.integer("revision") == 0L)
+        require(data.text("commitmentClass") == CommitmentClass.COMMITTED.name)
+        val revision = data.integer("revision")
+        if (revision == 0L) {
+            require("paidAmountMinor" !in data && "lastBillExpenseId" !in data)
+        } else {
+            require(revision > 0 && "paidAmountMinor" in data)
+            checkId(data.text("lastBillExpenseId"))
+        }
         val title = data.text("titleSnapshot")
         require(title.isNotBlank() && title.length <= 80)
         return Occurrence(
@@ -613,7 +652,7 @@ internal object FoundationCodec {
             timeZone = ZoneId.of(data.text("timeZone")),
             categoryId = data.text("categoryId").also(::checkId),
             commitmentClass = CommitmentClass.COMMITTED,
-            metadata = RecordMetadata(createdAt = data.instant("createdAt"), updatedAt = data.instant("updatedAt")),
+            metadata = RecordMetadata(data.instant("createdAt"), data.instant("updatedAt"), revision),
         )
     }
 

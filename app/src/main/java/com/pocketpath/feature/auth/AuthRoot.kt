@@ -163,8 +163,8 @@ fun AuthRoot(
                                 }
                                 if (visibleFinance.monthlyBills.hasUnresolvedSave) {
                                     if (isNotEmpty()) append("\n\n")
-                                    append("A bill save may already have reached the server. Signing out discards " +
-                                        "its retry details. Check Plan after signing back in before adding it again.")
+                                    append("A bill or payment may already have reached the server. Signing out discards " +
+                                        "its retry details. Check Plan and Activity after signing back in before trying again.")
                                 }
                                 if (visibleIncome.hasUnresolvedIncomeWork) {
                                     if (isNotEmpty()) append("\n\n")

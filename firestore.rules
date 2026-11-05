@@ -25,14 +25,16 @@ service cloud.firestore {
         && value.matches('[^/]+');
     }
 
-    function validDateParts(year, month, day) {
+    function daysInMonth(year, month) {
       let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-      let daysInMonth = month == 2
+      return month == 2
         ? (leap ? 29 : 28)
         : (month in [4, 6, 9, 11] ? 30 : 31);
+    }
 
+    function validDateParts(year, month, day) {
       return month >= 1 && month <= 12
-        && day >= 1 && day <= daysInMonth;
+        && day >= 1 && day <= daysInMonth(year, month);
     }
 
     function validDate(value) {
@@ -227,11 +229,12 @@ service cloud.firestore {
             'accountIds', 'categoryIds', 'goalIds', 'incomeSourceIds',
             'movements', 'components', 'reservationEffects', 'valuations'
           ],
-          ['note', 'merchantLabel', 'expectedPaymentId']
+          ['note', 'merchantLabel', 'expectedPaymentId', 'occurrenceId']
         )
         && validId(id)
         && data.operationId == id
         && data.kind in ['OPENING', 'EXPENSE', 'INCOME']
+        && (!('occurrenceId' in data) || (data.kind == 'EXPENSE' && validId(data.occurrenceId)))
         && (
           !('expectedPaymentId' in data)
           || (data.kind == 'INCOME' && validId(data.expectedPaymentId))
@@ -499,24 +502,71 @@ service cloud.firestore {
       return !exists(path) && existsAfter(path);
     }
 
-    function validFirstBillOccurrence(uid, occurrenceId, data) {
+    function validRecurringBillDate(date, anchor) {
+      let limit = daysInMonth(int(date[0:4]), int(date[5:7]));
+      let anchorDay = int(anchor[8:10]);
+      return int(date[8:10]) == (anchorDay <= limit ? anchorDay : limit);
+    }
+
+    function validBillOccurrence(uid, occurrenceId, data) {
       let path = billSchedulePath(uid, data.scheduleId);
       let schedule = getAfter(path).data;
-      // A new schedule must be part of the same write, and its create rule validates it.
-      return !exists(path)
-        && fields(data, [
+      return fields(data, [
           'scheduleId', 'nominalDate', 'effectiveDueDate', 'kind', 'titleSnapshot',
           'expectedAmountMinor', 'currencyCode', 'timeZone', 'categoryId', 'commitmentClass',
           'state', 'createdAt', 'updatedAt', 'revision'
         ], [])
-        && occurrenceId == data.scheduleId + '_' + schedule.anchorDate
-        && data.nominalDate == schedule.anchorDate && data.effectiveDueDate == data.nominalDate
+        && validDate(data.nominalDate)
+        && occurrenceId == data.scheduleId + '_' + data.nominalDate
+        && data.effectiveDueDate == data.nominalDate
+        && (data.nominalDate == schedule.anchorDate
+          ? !exists(path)
+          : exists(path) && data.nominalDate > schedule.anchorDate
+            && validRecurringBillDate(data.nominalDate, schedule.anchorDate))
         && data.kind == schedule.kind && data.titleSnapshot == schedule.title
         && data.expectedAmountMinor is int && data.expectedAmountMinor == schedule.expectedAmountMinor
         && data.currencyCode == schedule.currencyCode && data.timeZone == schedule.timeZone
         && data.categoryId == schedule.categoryId && data.commitmentClass == schedule.commitmentClass
         && data.state == 'OPEN' && data.revision is int && data.revision == 0
         && data.createdAt == request.time && data.updatedAt == request.time;
+    }
+
+    // The paid total is a projection of linked posted expenses. Both sides
+    // of a payment or void must agree on the exact delta in the same commit.
+    function validBillExpenseDelta(occurrenceId, before, after, expenseId, expense, direction) {
+      let component = expense.components[0];
+      return before.kind == 'COMMITMENT' && before.state == 'OPEN'
+        && expense.kind == 'EXPENSE' && expense.occurrenceId == occurrenceId
+        && component.categoryId == before.categoryId
+        && component.commitmentClass == 'COMMITTED'
+        && after.diff(before).affectedKeys().hasOnly([
+          'paidAmountMinor', 'lastBillExpenseId', 'revision', 'updatedAt'
+        ])
+        && after.lastBillExpenseId == expenseId
+        && after.revision is int && after.revision == before.revision + 1
+        && after.updatedAt == request.time
+        && after.paidAmountMinor is int && after.paidAmountMinor >= 0
+        && after.paidAmountMinor <= before.expectedAmountMinor
+        && after.paidAmountMinor == before.get('paidAmountMinor', 0) + direction * component.amountLkrMinor;
+    }
+
+    function validLinkedBillExpense(uid, expenseId, expense, direction) {
+      let path = billOccurrencePath(uid, expense.occurrenceId);
+      return validBillExpenseDelta(expense.occurrenceId, get(path).data, getAfter(path).data,
+        expenseId, expense, direction);
+    }
+
+    function validBillPaymentUpdate(uid, occurrenceId) {
+      let after = request.resource.data;
+      let path = eventPath(uid, after.lastBillExpenseId);
+      let expense = getAfter(path).data;
+      return validId(after.lastBillExpenseId) && (
+        (!exists(path) && expense.status == 'POSTED' && expense.createdAt == request.time
+          && validBillExpenseDelta(occurrenceId, resource.data, after, after.lastBillExpenseId, expense, 1))
+        || (exists(path) && get(path).data.status == 'POSTED' && expense.status == 'VOIDED'
+          && expense.updatedAt == request.time
+          && validBillExpenseDelta(occurrenceId, resource.data, after, after.lastBillExpenseId, expense, -1))
+      );
     }
 
     match /users/{uid} {
@@ -580,8 +630,9 @@ service cloud.firestore {
       match /occurrences/{occurrenceId} {
         allow create: if isOwner(uid) && validId(occurrenceId)
           && validId(request.resource.data.scheduleId)
-          && validFirstBillOccurrence(uid, occurrenceId, request.resource.data);
-        allow update, delete: if false;
+          && validBillOccurrence(uid, occurrenceId, request.resource.data);
+        allow update: if isOwner(uid) && validBillPaymentUpdate(uid, occurrenceId);
+        allow delete: if false;
       }
 
       match /budgets/{budgetId} {
@@ -608,6 +659,8 @@ service cloud.firestore {
             || (
               request.resource.data.kind == 'EXPENSE'
               && validExpense(uid, request.resource.data)
+              && (!('occurrenceId' in request.resource.data)
+                || validLinkedBillExpense(uid, transactionId, request.resource.data, 1))
             )
             || (
               request.resource.data.kind == 'INCOME'
@@ -616,7 +669,8 @@ service cloud.firestore {
             )
           );
 
-        allow update: if isOwner(uid) && validExpenseVoid();
+        allow update: if isOwner(uid) && validExpenseVoid()
+          && (!('occurrenceId' in resource.data) || validLinkedBillExpense(uid, transactionId, resource.data, -1));
         allow delete: if false;
       }
 

@@ -466,3 +466,80 @@ test('bill pairs are owner-only and immutable after creation', async () => {
   await assertFails(deleteDoc(billScheduleRef()));
   await assertFails(deleteDoc(billOccurrenceRef()));
 });
+
+function billPayment(id, amount) {
+  const expense = event(id, 'EXPENSE', -amount);
+  return {
+    ...expense,
+    occurrenceId: billOccurrenceId,
+    components: [{ ...expense.components[0], commitmentClass: 'COMMITTED' }],
+  };
+}
+
+function billProgress(expenseId, paidAmountMinor, revision) {
+  return { lastBillExpenseId: expenseId, paidAmountMinor, revision, updatedAt: serverTimestamp() };
+}
+
+function writeBillPayment(expense, total, revision, client = db) {
+  const batch = writeBatch(client);
+  batch.set(eventRef(expense.operationId, client), expense);
+  batch.update(billOccurrenceRef(client), billProgress(expense.operationId, total, revision));
+  return batch.commit();
+}
+
+test('bill payment posts once, allows partial and full settlement, and an atomic void restores the outstanding amount', async () => {
+  await assertSucceeds(writeMonthlyBill(monthlyBillPair()));
+  const first = billPayment('rent-partial', 1_000_000);
+  await assertSucceeds(writeBillPayment(first, 1_000_000, 1));
+  const partial = (await getDoc(billOccurrenceRef())).data();
+  assert.equal(partial.expectedAmountMinor - partial.paidAmountMinor, 2_400_000);
+  assert.deepEqual((await getDoc(eventRef(first.operationId))).data().movements, first.movements);
+  await assertFails(writeBillPayment(first, 2_000_000, 2));
+  await assertSucceeds(writeBillPayment(billPayment('rent-remainder', 2_400_000), 3_400_000, 2));
+  assert.equal((await getDoc(billOccurrenceRef())).data().paidAmountMinor, 3_400_000);
+  await assertFails(updateDoc(eventRef(first.operationId), voidPatch()));
+
+  const batch = writeBatch(db);
+  batch.update(eventRef(first.operationId), voidPatch());
+  batch.update(billOccurrenceRef(), billProgress(first.operationId, 2_400_000, 3));
+  await assertSucceeds(batch.commit());
+  assert.equal((await getDoc(billOccurrenceRef())).data().paidAmountMinor, 2_400_000);
+  assert.equal((await getDoc(eventRef(first.operationId))).data().status, 'VOIDED');
+  await assertFails(updateDoc(billOccurrenceRef(), billProgress(first.operationId, 1_400_000, 4)));
+});
+
+test('bill payment denies unpaired writes, invented totals, overpayments and another user', async () => {
+  await assertSucceeds(writeMonthlyBill(monthlyBillPair()));
+  const expense = billPayment('unapplied-rent', 1_000_000);
+  await assertFails(setDoc(eventRef(expense.operationId), expense));
+  await assertFails(updateDoc(billOccurrenceRef(), billProgress(expense.operationId, 1_000_000, 1)));
+  await assertFails(writeBillPayment(expense, 999_999, 1));
+  await assertFails(writeBillPayment(billPayment('overpayment', 3_400_001), 3_400_001, 1));
+  const other = environment.authenticatedContext('other-user').firestore();
+  await assertFails(writeBillPayment(expense, 1_000_000, 1, other));
+  assert.equal((await getDoc(billOccurrenceRef())).data().revision, 0);
+  assert.equal((await getDoc(eventRef(expense.operationId))).exists(), false);
+});
+
+test('later bills use the original monthly anchor and leave the unpaid first occurrence and ledger alone', async () => {
+  const { schedule, occurrence } = monthlyBillPair();
+  const anchor = '2027-01-31';
+  const anchorRef = billOccurrenceRef(db, `${billId}_${anchor}`);
+  const onDate = (date) => ({ ...occurrence, nominalDate: date, effectiveDueDate: date });
+  await assertSucceeds(writeMonthlyBill({
+    schedule: { ...schedule, anchorDate: anchor, activeFrom: anchor },
+    occurrence: onDate(anchor),
+  }, db, anchorRef.id));
+
+  const feb = billOccurrenceRef(db, `${billId}_2027-02-28`);
+  const mar = billOccurrenceRef(db, `${billId}_2027-03-31`);
+  await assertFails(setDoc(billOccurrenceRef(db, `${billId}_2027-02-27`), onDate('2027-02-27')));
+  await assertFails(setDoc(billOccurrenceRef(db, `${billId}_2027-03-28`), onDate('2027-03-28')));
+  await assertFails(setDoc(feb, { ...onDate('2027-02-28'), expectedAmountMinor: 1 }));
+  await assertSucceeds(setDoc(feb, onDate('2027-02-28')));
+  await assertSucceeds(setDoc(mar, onDate('2027-03-31')));
+  await assertFails(setDoc(feb, onDate('2027-02-28')));
+  assert.equal((await getDoc(anchorRef)).data().revision, 0);
+  assert.equal((await getDocs(collection(db, root, 'occurrences'))).size, 3);
+  assert.equal((await getDocs(collection(db, root, 'transactions'))).size, 1);
+});

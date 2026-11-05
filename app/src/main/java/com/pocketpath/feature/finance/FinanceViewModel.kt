@@ -54,6 +54,7 @@ class FinanceViewModel @Inject constructor(
     private var pendingBudgetOperationId: String? = null
 
     private var pendingMonthlyBill: Schedule? = null
+    private var pendingBillPayment: RecordExpenseCommand? = null
 
     private var activityJob: Job? = null
     private var activityRequest = 0
@@ -82,6 +83,7 @@ class FinanceViewModel @Inject constructor(
                         pendingBudget = null
                         pendingBudgetOperationId = null
                         pendingMonthlyBill = null
+                        pendingBillPayment = null
                         _state.value = FinanceUiState(loading = false)
                         return@collectLatest
                     }
@@ -96,7 +98,10 @@ class FinanceViewModel @Inject constructor(
                         pendingBudgetOperationId = null
                     }
 
-                    if (previous == null) pendingMonthlyBill = null
+                    if (previous == null) {
+                        pendingMonthlyBill = null
+                        pendingBillPayment = null
+                    }
 
                     _state.value = FinanceUiState(
                         userId = uid,
@@ -108,6 +113,10 @@ class FinanceViewModel @Inject constructor(
                             bills.copy(
                                 loading = true,
                                 cached = true,
+                                payment = bills.payment?.copy(
+                                    busy = false,
+                                    retryRequired = pendingBillPayment != null,
+                                ),
                                 form = bills.form?.copy(
                                     busy = false,
                                     retryRequired = pendingMonthlyBill != null,
@@ -193,6 +202,18 @@ class FinanceViewModel @Inject constructor(
                                                 error = observation.failure.message,
                                             )
                                         })
+                                    }
+                                    if (observation is Observation.Data &&
+                                        observation.metadata.origin == DataOrigin.SERVER
+                                    ) {
+                                        val extension = current.extendMonthlyBills(observation.value, LocalDate.now(zone))
+                                        if (epoch == generation && _state.value.userId == uid) {
+                                            _state.update { state ->
+                                                state.copy(monthlyBills = state.monthlyBills.copy(
+                                                    recurrenceError = (extension as? CommandResult.Rejected)?.failure?.message,
+                                                ))
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -678,6 +699,25 @@ class FinanceViewModel @Inject constructor(
                 )
             }
             FinanceEvent.SaveMonthlyBill -> saveMonthlyBill()
+            is FinanceEvent.OpenBillPayment -> openBillPayment(event.occurrenceId)
+            FinanceEvent.CloseBillPayment -> _state.update { state ->
+                val payment = state.monthlyBills.payment
+                if (payment?.busy == true) state
+                else state.copy(monthlyBills = state.monthlyBills.copy(
+                    payment = payment?.takeIf { it.retryRequired },
+                    showPayment = false,
+                ))
+            }
+            is FinanceEvent.EditBillPayment -> editBillPayment { form ->
+                if (form.busy || form.retryRequired) form
+                else form.copy(
+                    accountId = event.accountId ?: form.accountId,
+                    amount = event.amount ?: form.amount,
+                    date = event.date ?: form.date,
+                    error = null,
+                )
+            }
+            FinanceEvent.SubmitBillPayment -> submitBillPayment()
 
             FinanceEvent.ReloadActivity -> loadActivity(reset = true)
 
@@ -686,6 +726,83 @@ class FinanceViewModel @Inject constructor(
                     _state.value.nextActivityCursor != null
                 ) {
                     loadActivity(reset = false)
+                }
+            }
+        }
+    }
+
+    private fun openBillPayment(id: String) {
+        val state = _state.value
+        val bills = state.monthlyBills
+        if (bills.payment != null) {
+            if (bills.payment.occurrenceId == id) {
+                _state.update { it.copy(monthlyBills = it.monthlyBills.copy(showPayment = true)) }
+            }
+            return
+        }
+        if (bills.cached || bills.loading || bills.error != null) return
+        val bill = bills.occurrences.firstOrNull { it.occurrence.id == id && it.remainingMinor > 0 } ?: return
+        val account = state.selectableAccounts.firstOrNull() ?: return
+        val form = BillPaymentForm(id, bill.occurrence.titleSnapshot, account.id, "", today())
+        _state.update { it.copy(monthlyBills = it.monthlyBills.copy(payment = form, showPayment = true)) }
+    }
+
+    private fun editBillPayment(update: (BillPaymentForm) -> BillPaymentForm) {
+        _state.update { state ->
+            val form = state.monthlyBills.payment ?: return@update state
+            state.copy(monthlyBills = state.monthlyBills.copy(payment = update(form)))
+        }
+    }
+
+    private fun submitBillPayment() {
+        val state = _state.value
+        val form = state.monthlyBills.payment ?: return
+        val uid = state.userId ?: return
+        val repo = repository ?: return
+        val scope = sessionScope ?: return
+        if (form.busy || !state.monthlyBills.showPayment) return
+
+        val payment = pendingBillPayment ?: run {
+            val bill = state.monthlyBills.occurrences.firstOrNull { it.occurrence.id == form.occurrenceId } ?: return
+            val now = Instant.now()
+            val amount = runCatching { EntryAmount(Money.parse(form.amount.trim(), FiatCurrency.LKR)) }.getOrNull()
+            val time = runCatching { financialTime(form.date, now) }.getOrNull()
+            if (amount == null || amount.money.minor > bill.remainingMinor || time == null ||
+                state.selectableAccounts.none { it.id == form.accountId }
+            ) {
+                editBillPayment { it.copy(error = "Choose an account, enter a positive amount within the remaining bill, and use today or an earlier date.") }
+                return
+            }
+            RecordExpenseCommand(
+                operationId = UUID.randomUUID().toString(),
+                accountId = form.accountId,
+                amount = amount,
+                categoryId = requireNotNull(bill.occurrence.categoryId),
+                commitmentClass = CommitmentClass.COMMITTED,
+                financialTime = time,
+                clientCreatedAt = now,
+                occurrenceId = form.occurrenceId,
+                note = bill.occurrence.titleSnapshot,
+            )
+        }
+
+        pendingBillPayment = payment
+        editBillPayment { it.copy(busy = true, error = null) }
+        val epoch = generation
+        scope.launch {
+            val result = repo.payMonthlyBill(payment)
+            if (epoch != generation || _state.value.userId != uid) return@launch
+            when (result) {
+                is CommandResult.Accepted -> {
+                    pendingBillPayment = null
+                    _state.update {
+                        it.copy(monthlyBills = it.monthlyBills.copy(payment = null, showPayment = false))
+                    }
+                }
+                is CommandResult.Rejected -> {
+                    val uncertain = result.failure.code in setOf(FailureCode.NETWORK, FailureCode.REJECTED)
+                    if (!uncertain) pendingBillPayment = null
+                    editBillPayment { it.copy(busy = false, retryRequired = uncertain, error = result.failure.message) }
                 }
             }
         }

@@ -10,7 +10,7 @@ import com.pocketpath.domain.model.BudgetScope
 import com.pocketpath.domain.model.Category
 import com.pocketpath.domain.model.CommitmentClass
 import com.pocketpath.domain.model.FinancialTransaction
-import com.pocketpath.domain.model.Occurrence
+import com.pocketpath.domain.model.MonthlyBill
 import com.pocketpath.domain.money.FiatCurrency
 import com.pocketpath.domain.repository.WriteState
 import com.pocketpath.domain.repository.ActivityCursor
@@ -78,15 +78,31 @@ data class MonthlyBillForm(
     val error: String? = null,
 )
 
+data class BillPaymentForm(
+    val occurrenceId: String,
+    val title: String,
+    val accountId: String,
+    val amount: String,
+    val date: String,
+    val busy: Boolean = false,
+    val retryRequired: Boolean = false,
+    val error: String? = null,
+)
+
 data class MonthlyBillsUiState(
-    val occurrences: List<Occurrence> = emptyList(),
+    val occurrences: List<MonthlyBill> = emptyList(),
+    val recurrenceError: String? = null,
+    val payment: BillPaymentForm? = null,
+    val showPayment: Boolean = false,
     val loading: Boolean = true,
     val cached: Boolean = false,
     val error: String? = null,
     val form: MonthlyBillForm? = null,
     val showForm: Boolean = false,
 ) {
-    val hasUnresolvedSave: Boolean get() = form?.let { it.busy || it.retryRequired } == true
+    val hasUnresolvedSave: Boolean
+        get() = form?.let { it.busy || it.retryRequired } == true ||
+            payment?.let { it.busy || it.retryRequired } == true
 }
 
 data class FinanceUiState(
@@ -218,6 +234,14 @@ sealed interface FinanceEvent {
         val dueDate: String? = null,
     ) : FinanceEvent
     data object SaveMonthlyBill : FinanceEvent
+    data class OpenBillPayment(val occurrenceId: String) : FinanceEvent
+    data object CloseBillPayment : FinanceEvent
+    data class EditBillPayment(
+        val accountId: String? = null,
+        val amount: String? = null,
+        val date: String? = null,
+    ) : FinanceEvent
+    data object SubmitBillPayment : FinanceEvent
 
     data object ReloadActivity : FinanceEvent
     data object LoadMoreActivity : FinanceEvent
