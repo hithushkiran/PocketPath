@@ -73,6 +73,14 @@ fun AddScreen(
             onSelected = { onEvent(FinanceEvent.ExpenseCategoryChanged(it)) },
         )
 
+        OutlinedButton(
+            onClick = { onEvent(FinanceEvent.ToggleCategoryDialog(true)) },
+            enabled = editable,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Add custom category")
+        }
+
         if (state.ready && state.selectableCategories.isEmpty()) {
             Text("No active categories are available.")
         }
@@ -193,6 +201,104 @@ fun AddScreen(
                     },
                 )
             }
+        }
+
+        if (state.showCategoryDialog) {
+            val catForm = state.categoryForm
+            AlertDialog(
+                onDismissRequest = {
+                    if (!catForm.busy) {
+                        onEvent(FinanceEvent.ToggleCategoryDialog(false))
+                    }
+                },
+                title = { Text("Add Custom Category") },
+                text = {
+                    Column(
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        OutlinedTextField(
+                            value = catForm.name,
+                            onValueChange = { onEvent(FinanceEvent.CategoryNameChanged(it)) },
+                            label = { Text("Category name") },
+                            supportingText = { Text("${catForm.name.length}/80 characters") },
+                            singleLine = true,
+                            enabled = !catForm.busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+
+                        Text("Default commitment type", style = MaterialTheme.typography.titleSmall)
+
+                        Column(modifier = Modifier.selectableGroup()) {
+                            CommitmentClass.entries.forEach { classification ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .selectable(
+                                            selected = catForm.classification == classification,
+                                            enabled = !catForm.busy,
+                                            role = Role.RadioButton,
+                                            onClick = {
+                                                onEvent(FinanceEvent.CategoryClassChanged(classification))
+                                            },
+                                        ),
+                                ) {
+                                    RadioButton(
+                                        selected = catForm.classification == classification,
+                                        onClick = null,
+                                        enabled = !catForm.busy,
+                                    )
+                                    Text(
+                                        text = when (classification) {
+                                            CommitmentClass.COMMITTED -> "Committed"
+                                            CommitmentClass.DISCRETIONARY -> "Discretionary"
+                                            CommitmentClass.UNPLANNED_ESSENTIAL -> "Unplanned essential"
+                                        },
+                                        modifier = Modifier.align(
+                                            androidx.compose.ui.Alignment.CenterVertically,
+                                        ),
+                                    )
+                                }
+                            }
+                        }
+
+                        OutlinedTextField(
+                            value = catForm.iconKey,
+                            onValueChange = { onEvent(FinanceEvent.CategoryIconChanged(it)) },
+                            label = { Text("Icon key (optional)") },
+                            singleLine = true,
+                            enabled = !catForm.busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+
+                        catForm.error?.let { FinanceMessage(it) }
+
+                        if (catForm.busy) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.align(
+                                    androidx.compose.ui.Alignment.CenterHorizontally,
+                                ),
+                            )
+                        }
+                    }
+                },
+                confirmButton = {
+                    Button(
+                        onClick = { onEvent(FinanceEvent.SaveCategory) },
+                        enabled = !catForm.busy && catForm.name.isNotBlank(),
+                    ) {
+                        Text(if (catForm.busy) "Saving…" else "Save Category")
+                    }
+                },
+                dismissButton = {
+                    TextButton(
+                        onClick = { onEvent(FinanceEvent.ToggleCategoryDialog(false)) },
+                        enabled = !catForm.busy,
+                    ) {
+                        Text("Cancel")
+                    }
+                },
+            )
         }
     }
 }

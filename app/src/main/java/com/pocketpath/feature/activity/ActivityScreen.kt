@@ -70,7 +70,23 @@ fun ActivityScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    Text(title, style = MaterialTheme.typography.titleMedium)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(title, style = MaterialTheme.typography.titleMedium)
+
+                        if (event.status == com.pocketpath.domain.model.TransactionStatus.VOIDED) {
+                            AssistChip(
+                                onClick = {},
+                                label = { Text("Voided") },
+                                colors = AssistChipDefaults.assistChipColors(
+                                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                                    labelColor = MaterialTheme.colorScheme.onErrorContainer,
+                                ),
+                            )
+                        }
+                    }
 
                     if (event.id in state.pendingExpenseIds) {
                         Text("Awaiting synchronization")
@@ -91,8 +107,27 @@ fun ActivityScreen(
                     Text(event.financialTime.occurredLocalDate.toString())
                     event.note?.let { Text(it) }
 
+                    if (event.status == com.pocketpath.domain.model.TransactionStatus.VOIDED) {
+                        event.voidMetadata?.voidReason?.let { reason ->
+                            Text("Void reason: $reason", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+
                     if (event.kind == TransactionKind.OPENING) {
                         Text("Included in balance; excluded from income.")
+                    }
+
+                    if (event.kind == TransactionKind.EXPENSE &&
+                        event.status == com.pocketpath.domain.model.TransactionStatus.POSTED
+                    ) {
+                        TextButton(
+                            onClick = { onEvent(FinanceEvent.OpenVoidDialog(event.id)) },
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error,
+                            ),
+                        ) {
+                            Text("Void expense")
+                        }
                     }
                 }
             }
@@ -126,5 +161,78 @@ fun ActivityScreen(
                 }
             }
         }
+    }
+
+    if (state.showVoidDialog) {
+        val voidForm = state.voidForm
+        val targetTx = state.activity.firstOrNull { it.id == voidForm.transactionId }
+
+        AlertDialog(
+            onDismissRequest = {
+                if (!voidForm.busy) {
+                    onEvent(FinanceEvent.ToggleVoidDialog(false))
+                }
+            },
+            title = { Text("Void Expense") },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    targetTx?.movements?.singleOrNull()?.amount?.let { amount ->
+                        Text(
+                            "Amount: ${amount.asset.code} ${amount.major().toPlainString()}",
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                    }
+
+                    Text(
+                        "Voiding this expense will restore your account balance and " +
+                            "exclude it from budgets and totals, while preserving its record in history.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+
+                    OutlinedTextField(
+                        value = voidForm.reason,
+                        onValueChange = { onEvent(FinanceEvent.VoidReasonChanged(it)) },
+                        label = { Text("Reason for voiding") },
+                        supportingText = { Text("${voidForm.reason.length}/1000 characters") },
+                        singleLine = true,
+                        enabled = !voidForm.busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+
+                    voidForm.error?.let { FinanceMessage(it) }
+
+                    if (voidForm.busy) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.align(
+                                androidx.compose.ui.Alignment.CenterHorizontally,
+                            ),
+                        )
+                    }
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = { onEvent(FinanceEvent.SubmitVoidExpense) },
+                    enabled = !voidForm.busy && voidForm.reason.isNotBlank(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error,
+                        contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) {
+                    Text(if (voidForm.busy) "Voiding…" else "Void Expense")
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { onEvent(FinanceEvent.ToggleVoidDialog(false)) },
+                    enabled = !voidForm.busy,
+                ) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
