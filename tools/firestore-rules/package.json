@@ -1,0 +1,16 @@
+{
+  "name": "pocketpath-pr3-firestore-rules-tests",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 --test-reporter=spec rules.test.mjs"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.0",
+    "firebase": "12.4.0"
+  }
+}

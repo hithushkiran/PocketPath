@@ -5,6 +5,8 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.LocalTime
 import java.time.ZoneId
+import java.nio.charset.StandardCharsets
+import java.security.MessageDigest
 
 /** Server audit times may remain unresolved while a command is pending. */
 data class RecordMetadata(
@@ -82,12 +84,18 @@ data class ExpectedPayment(
     val milestoneLabel: String? = null, val clientLabel: String? = null,
     val state: ExpectedPaymentState = ExpectedPaymentState.ACTIVE,
     val cancelledAt: Instant? = null, val notes: String? = null,
+    val cancellationOperationId: String? = null,
+    val receivedAmountMinor: Long = 0L,
+    val lastReceiptOperationId: String? = null,
     val metadata: RecordMetadata = RecordMetadata(),
 ) {
     init {
         require(id.isNotBlank() && incomeSourceId.isNotBlank() && projectLabel.isNotBlank())
         require(notes == null || notes.length <= 1000)
         require((state == ExpectedPaymentState.CANCELLED) == (cancelledAt != null))
+        require(receivedAmountMinor in 0..amountDue.money.minor)
+        cancellationOperationId?.let { require(it.isNotBlank() && '/' !in it) }
+        lastReceiptOperationId?.let { require(it.isNotBlank() && '/' !in it) }
     }
 }
 
@@ -150,6 +158,20 @@ object StableIds {
     fun occurrence(scheduleId: String, nominalDate: LocalDate) = "${checked(scheduleId)}_$nominalDate"
     // SRS worked example: salary_monthly_2026-10-25 -> receipt_salary_monthly_2026-10-25.
     fun scheduledReceipt(occurrenceId: String) = "receipt_${checked(occurrenceId)}"
+    fun expectedPaymentReceipt(paymentId: String, expectedRevision: Long): String {
+        require(expectedRevision >= 0)
+        val identity = "${checked(paymentId).length}:${checked(paymentId)}:$expectedRevision"
+        val bytes = MessageDigest.getInstance("SHA-256").digest(identity.toByteArray(StandardCharsets.UTF_8))
+        val digits = "0123456789abcdef"
+        val hash = buildString(bytes.size * 2) {
+            bytes.forEach { byte ->
+                val value = byte.toInt() and 0xff
+                append(digits[value ushr 4])
+                append(digits[value and 0x0f])
+            }
+        }
+        return "expected-receipt_$hash"
+    }
     fun goalPlan(goalId: String, periodStart: LocalDate) = "${checked(goalId)}_$periodStart"
 }
 
